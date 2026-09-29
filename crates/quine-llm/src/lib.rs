@@ -54,28 +54,160 @@ pub struct LlmResponse {
 }
 
 impl LlmResponse {
-    /// Markdown kod bloklarını soyup saf kod parçalarını birleştirir.
-    /// LLM çıktısından derlenecek kaynak kodu çıkarmak için kullanılır (Faz 1).
+    /// LLM yanıtından derlenecek saf Rust kodunu çıkarır (Faz 1).
+    ///
+    /// Sıralı strateji:
+    /// 1. ` thinking` blokları temizlenir (bazı modeller muhakemesini basar).
+    /// 2. Varsa ```` ```rust ```` blokları birleştirilir.
+    /// 3. Yoksa herhangi bir ```` ``` ```` bloğu alınır.
+    /// 4. Hiç fence yoksa ham metinden ilk fonksiyon tanımı ayıklanır.
+    /// 5. Hiçbiri olmazsa ham içerik döndürülür (son çare).
+    ///
+    /// Dördüncü adım, fence kullanmayan yanıtlarda açıklama metninin
+    /// koda karışıp derlemeyi bozmasını engeller.
     pub fn extract_code(&self) -> String {
-        let mut out = String::new();
-        let mut in_fence = false;
-        for line in self.content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("```") {
-                in_fence = !in_fence;
-                continue;
-            }
-            if in_fence {
-                out.push_str(line);
-                out.push('\n');
+        let cleaned = strip_think_blocks(&self.content);
+
+        let rust_fenced = collect_fences(&cleaned, Some("rust"));
+        if !rust_fenced.trim().is_empty() {
+            return rust_fenced;
+        }
+
+        let any_fenced = collect_fences(&cleaned, None);
+        if !any_fenced.trim().is_empty() {
+            return any_fenced;
+        }
+
+        if let Some(func) = extract_first_function(&cleaned) {
+            return func;
+        }
+
+        cleaned
+    }
+}
+
+/// ` thinking...</think>` / `<thinking>...</thinking>` bloklarını siler.
+/// ` thinking...</think>` ve `<thinking>...</thinking>` bloklarini siler.
+/// ` thinking...</think>` ve `<thinking>...</thinking>` bloklarini siler.
+/// Kapanmamis blok varsa kalan tum icerik atilir.
+fn strip_think_blocks(content: &str) -> String {
+    // Tag'ler `concat!` ile kurulur; kaynakta ham angle-bracket tag bulunmaz.
+    let pairs: [(&str, &str); 2] = [
+        (" thinking", " response"),
+        (
+            concat!("<", "thinking", ">"),
+            concat!("</", "thinking", ">"),
+        ),
+    ];
+
+    let mut out = String::new();
+    let mut rest = content;
+
+    'outer: loop {
+        let mut earliest: Option<(usize, &str, &str)> = None;
+        for (open, close) in pairs.iter() {
+            if let Some(pos) = rest.find(open) {
+                if earliest.is_none_or(|(best, _, _)| pos < best) {
+                    earliest = Some((pos, open, close));
+                }
             }
         }
-        if out.trim().is_empty() {
-            // Hiç fence yoksa ham içeriği döndür.
-            self.content.clone()
-        } else {
-            out
+
+        let Some((start, _open, close)) = earliest else {
+            break;
+        };
+
+        out.push_str(&rest[..start]);
+        match rest[start..].find(close) {
+            Some(end) => rest = &rest[start + end + close.len()..],
+            None => {
+                rest = "";
+                break 'outer;
+            }
         }
+    }
+
+    out.push_str(rest);
+    out
+}
+
+/// ``` fence'leri içindeki kodu toplar. `lang` verilirse yalnızca o dil
+/// etiketli bloklar alınır (örn. `rust`); `None` ise tüm bloklar.
+fn collect_fences(content: &str, lang: Option<&str>) -> String {
+    let mut out = String::new();
+    let mut in_fence = false;
+    let mut is_target = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            if !in_fence {
+                let info = trimmed.trim_start_matches('`').trim().to_ascii_lowercase();
+                is_target = match lang {
+                    None => true,
+                    Some(l) => info.split_whitespace().next() == Some(l),
+                };
+                in_fence = true;
+            } else {
+                in_fence = false;
+                is_target = false;
+            }
+            continue;
+        }
+        if in_fence && is_target {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Ham metinden ilk `fn` tanımını ve gövdesini (süslü parantez dengesiyle) ayıklar.
+/// Süslü parantezler string/char literalleri içinde sayılmaz; benchmark
+/// problemleri için bu basitleştirme yeterlidir.
+fn extract_first_function(content: &str) -> Option<String> {
+    const PREFIXES: [&str; 7] = [
+        "pub fn ",
+        "pub(crate) fn ",
+        "pub(super) fn ",
+        "pub async fn ",
+        "async fn ",
+        "fn ",
+        "unsafe fn ",
+    ];
+
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| PREFIXES.iter().any(|p| l.trim_start().starts_with(p)))?;
+
+    let mut depth: i32 = 0;
+    let mut started = false;
+    let mut out = String::new();
+
+    for line in &lines[start..] {
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    started = true;
+                }
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+        if started && depth <= 0 {
+            return Some(out);
+        }
+    }
+
+    // Gövdesiz imza (trait metodu gibi) veya kapanmamış blok: güvenli fallback.
+    if started {
+        Some(out)
+    } else {
+        None
     }
 }
 
@@ -347,7 +479,79 @@ mod tests {
             model: "m".into(),
             duration_ns: None,
         };
-        assert_eq!(r.extract_code(), "fn x() {}");
+        assert_eq!(r.extract_code().trim(), "fn x() {}");
+    }
+
+    #[test]
+    fn extract_code_prefers_rust_fence_over_other_languages() {
+        let r = LlmResponse {
+            content: "Örnek:\n```python\nprint('x')\n```\n```rust\npub fn a() -> u32 { 1 }\n```"
+                .into(),
+            model: "m".into(),
+            duration_ns: None,
+        };
+        let code = r.extract_code();
+        assert!(code.contains("pub fn a"), "got: {code:?}");
+        assert!(!code.contains("print"), "python bloğu alınmamalı: {code:?}");
+    }
+
+    #[test]
+    fn extract_code_strips_think_blocks() {
+        let open = concat!("<", "thinking", ">");
+        let close = concat!("</", "thinking", ">");
+        let content = format!(
+            "{open}burada uzun bir muhakeme var{close}\n```rust\npub fn a() -> u32 {{ 1 }}\n```"
+        );
+        let r = LlmResponse {
+            content,
+            model: "m".into(),
+            duration_ns: None,
+        };
+        let code = r.extract_code();
+        assert_eq!(code.trim(), "pub fn a() -> u32 { 1 }");
+        assert!(!code.contains("muhakeme"));
+    }
+
+    #[test]
+    fn extract_code_strips_qwen_style_think_tags() {
+        let r = LlmResponse {
+            content: "🤔 thinkingburada muhakeme🤔 response\n```rust\npub fn a() -> u32 { 1 }\n```"
+                .into(),
+            model: "m".into(),
+            duration_ns: None,
+        };
+        let code = r.extract_code();
+        assert_eq!(code.trim(), "pub fn a() -> u32 { 1 }");
+        assert!(!code.contains("muhakeme"));
+    }
+
+    #[test]
+    fn extract_code_pulls_function_from_unfenced_prose() {
+        // Regresyon: model fence kullanmadan prose içinde kod verirse, yalnızca
+        // fonksiyon ayıklanmalı — açıklama satırları derlemeye karışmamalı.
+        let content = "İşte çözüm:\n\npub fn reverse_string(s: &str) -> String {\n    s.chars().rev().collect()\n}\n\nBu kod metni ters çevirir.\n";
+        let r = LlmResponse {
+            content: content.into(),
+            model: "m".into(),
+            duration_ns: None,
+        };
+        let code = r.extract_code();
+        assert!(code.contains("pub fn reverse_string"));
+        assert!(!code.contains("İşte çözüm"), "prose karışmamalı: {code:?}");
+        assert!(
+            !code.contains("ters çevirir"),
+            "sondaki prose karışmamalı: {code:?}"
+        );
+    }
+
+    #[test]
+    fn extract_code_falls_back_to_raw_when_no_function() {
+        let r = LlmResponse {
+            content: "Üzgünüm, bu isteği yanıtlayamam.".into(),
+            model: "m".into(),
+            duration_ns: None,
+        };
+        assert_eq!(r.extract_code().trim(), "Üzgünüm, bu isteği yanıtlayamam.");
     }
 
     #[tokio::test]
