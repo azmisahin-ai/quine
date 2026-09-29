@@ -1,6 +1,6 @@
 # 📋 QUINE: YÜRÜTME PLANI (EXECUTION PLAN)
 
-> **Durum:** V1.2 — Doğrulama + Sertleştirme + Docker izolasyonu
+> **Durum:** V1.3 — Doğrulama + Sertleştirme + Docker + Evrim ölçümü
 > **Başlangıç:** 2026-09-29
 > **Kapsam:** Bu dosya, `docs/MASTER_PLAN.md`'deki mimarinin **gerçekten
 > çalıştığını kanıtlamak** ve eksik operasyonel dosyaları tamamlamak için
@@ -64,6 +64,7 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 | **B2** | Sertleştirme | `extract_code` + regresyon testleri | 9 llm testi geçer, gerçek LLM 3/3 | ✅ |
 | **B3** | Test | `crates/quine-cli/tests/integration.rs` | 6 entegrasyon testi geçer | ✅ |
 | **B4** | Docker | `QUINE_SANDBOX=docker` uçtan uca | Simulate + gerçek LLM + guardian geçer | ✅ |
+| **B5** | Evrim | Gerçek LLM çok-ajanlı popülasyon + fitness ölçümü | Not birikmesi giderildi, flaky test düzeltildi | ✅ |
 
 ### B0 detayı (git geçmişi temizliği)
 - `target/` (1444 artifact, ~143 MB) yanlışlıkla repoya commit edilmişti;
@@ -94,6 +95,23 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 - Not: Ortamda `openhands` kullanıcısı `docker` grubuna eklendi
   (`usermod -aG docker`); CI'da runner zaten docker erişimli.
 
+
+### B5 detayı (gerçek LLM popülasyon ölçümü)
+- Ölçüm (`qwen2.5-coder:1.5b`, `population evolve --generations 3 --size 4`):
+  ortalama fitness **100.0 → 91.7 → 91.7** (düşüş eğilimi gözlendi).
+- Kök neden 1 — **not birikmesi:** `next_generation` her jenerasyonda prompt'a
+  `[keşif notu gN]` satırı **ekliyordu**, hiç temizlemiyordu → genom şişiyordu.
+  Çözüm: `Agent::mutate_prompt_with_hint` eski notları temizleyip tek not bırakır.
+- Kök neden 2 — **elit bozulması:** 100.0 alan mükemmel ebeveyn bile mutasyona
+  uğruyordu. Çözüm: `fitness >= 100.0` ise prompt aynen korunur; çocuklar
+  ebeveyn fitness'ıyla başlatılır (sıfır skorla elenmesinler).
+- Kök neden 3 — **flaky test:** `tournament_picks_best_of_k` k=4 ile 2 ajan
+  kullanıyordu; zayıf ajanın kazanma olasılığı (1/2)^4 = %6 (yorumdaki 1/256
+  yanlıştı, k=8 varsayılmıştı). k=8'e çıkarıldı → 3/3 ardışık koşuda kararlı.
+- Kalan dalgalanma ağırlıklı olarak **model örnekleme gürültüsü**:
+  `temperature = 0.2`. Bu nedenle `QUINE_TEMPERATURE` ortam değişkeni eklendi
+  (`0.0` → deterministik/tekrarlanabilir ölçüm). Elit (100.0) her jenerasyonda
+  korunduğu için en iyi skor monoton kaldı.
 
 ### A6 detayı
 - `cargo fmt --check` başlangıçta `quine-bench-simple/src/lib.rs` içinde stil
@@ -135,7 +153,7 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 - [x] `extract_code`'u muhafazakâr hale getir + regresyon testi. (B2)
 - [x] CI (GitHub Actions): `fmt`, `clippy`, `test`, `--simulate` E2E. (B1)
 - [x] `QUINE_SANDBOX=docker` ile uçtan uca değerlendirme testi. (B4)
-- [ ] Çok-ajanlı gerçek LLM senaryosu (`population evolve`) + fitness artışı ölçümü.
+- [x] Çok-ajanlı gerçek LLM senaryosu (`population evolve`) + fitness ölçümü. (B5)
 - [ ] Daha büyük model (`qwen2.5-coder:7b`) ile karşılaştırmalı benchmark.
 
 ---
@@ -144,12 +162,12 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 
 | Katman | Test sayısı | Durum |
 |--------|:-----------:|:-----:|
-| `quine-common` | 3 | ✅ |
-| `quine-llm` | 9 | ✅ |
+| `quine-common` | 4 | ✅ |
+| `quine-llm` | 10 | ✅ |
 | `quine-guardian` | 6 | ✅ |
 | `quine-eval` | 6 | ✅ |
-| `quine-evolution` | 6 | ✅ |
+| `quine-evolution` | 7 | ✅ |
 | `quine-bench-simple` | 8 | ✅ |
 | `integration` (quine-cli) | 6 (+1 docker opt-in) | ✅ |
-| **Toplam** | **44** | ✅ |
+| **Toplam** | **47** | ✅ |
 

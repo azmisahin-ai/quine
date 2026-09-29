@@ -57,6 +57,21 @@ impl Agent {
             created_at: Utc::now(),
         }
     }
+
+    /// Keşif notunu **değiştirerek** prompt'u mutasyona uğratır.
+    ///
+    /// [`Agent::mutate_prompt`]'ten farkı: önceki jenerasyonlardan kalan
+    /// `[keşif notu gN]` satırlarını temizler. Aksi halde ardışık
+    /// jenerasyonlarda notlar üst üste birikerek prompt'u şişirir.
+    pub fn mutate_prompt_with_hint(&self, hint: &str) -> Agent {
+        let base = self
+            .system_prompt
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("[keşif notu g"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.mutate_prompt(format!("{}\n{hint}", base.trim_end()))
+    }
 }
 
 /// Ajanın varsayılan sistem prompt'u (Turkish, code-focused).
@@ -173,6 +188,25 @@ mod tests {
         assert_eq!(child.parent_id, Some(parent.id));
         assert_ne!(child.id, parent.id);
         assert_eq!(child.system_prompt, "yeni prompt");
+    }
+
+    #[test]
+    fn mutate_prompt_with_hint_replaces_previous_hints() {
+        let root = Agent::new("root");
+        let g1 = root.mutate_prompt_with_hint("[keşif notu g1] HINT_A");
+        let g2 = g1.mutate_prompt_with_hint("[keşif notu g2] HINT_B");
+        let g3 = g2.mutate_prompt_with_hint("[keşif notu g3] HINT_C");
+
+        let hint_count = g3
+            .system_prompt
+            .lines()
+            .filter(|l| l.starts_with("[keşif notu g"))
+            .count();
+        assert_eq!(hint_count, 1, "notlar birikmemeli: {}", g3.system_prompt);
+        assert!(g3.system_prompt.contains("HINT_C"));
+        assert!(!g3.system_prompt.contains("HINT_A"));
+        assert!(!g3.system_prompt.contains("HINT_B"));
+        assert_eq!(g3.generation, 3);
     }
 
     #[test]

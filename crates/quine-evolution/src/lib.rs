@@ -270,11 +270,21 @@ impl PopulationManager {
                 .or(sorted.first())
                 .expect("popülasyon boş değil");
             // Basit genom mutasyonu: prompt sonuna keşif notu ekle.
-            let mutated = parent.mutate_prompt(format!(
-                "{}\n[keşif notu g{}] Denemeler arası tutarlı ol; önceki hatalardan ders çıkar.",
-                parent.system_prompt,
-                parent.generation + 1
-            ));
+            // `mutate_prompt_with_hint` önceki notları temizlediği için
+            // jenerasyonlar arası not birikmesi olmaz.
+            let mut mutated = if parent.fitness_score >= 100.0 {
+                // Zaten mükemmel olan genomu bozma: prompt'u aynen koru.
+                parent.mutate_prompt(parent.system_prompt.clone())
+            } else {
+                let hint = format!(
+                    "[keşif notu g{}] Denemeler arası tutarlı ol; önceki hatalardan ders çıkar.",
+                    parent.generation + 1
+                );
+                parent.mutate_prompt_with_hint(&hint)
+            };
+            // Çocukları ebeveyn fitness'ıyla başlat ki bir sonraki turnuvada
+            // sıfırlanmış skorla elenmesinler.
+            mutated.fitness_score = parent.fitness_score;
             next.push(mutated);
         }
         next
@@ -387,10 +397,10 @@ mod tests {
         a.fitness_score = 10.0;
         let mut b = Agent::new("b");
         b.fitness_score = 90.0;
-        let picks = pm.select_parents_tournament(&[a.clone(), b.clone()], 4, 50);
-        // Popülasyon 2 kişilik ve fitness farku büyük (90 vs 10): k=4 cekiste
-        // a'nin hic cekilmeme olasiligi ~1/256 — pratikte tum secimler b olmali.
-        // Yine de nadir randomness'e karsi toleransli dogrulama: >= %90 b secilmeli.
+        let picks = pm.select_parents_tournament(&[a.clone(), b.clone()], 8, 50);
+        // Popülasyon 2 kişilik ve fitness farkı büyük (90 vs 10): k=8 çekişte
+        // a'nın hiç çekilmeme olasılığı (1/2)^8 = 1/256 — pratikte tüm seçimler b olmalı.
+        // Yine de nadir randomness'e karşı toleranslı doğrulama: >= %90 b seçilmeli.
         let b_count = picks.iter().filter(|id| **id == b.id).count();
         assert!(
             b_count * 10 >= picks.len() * 9,
@@ -477,5 +487,29 @@ mod tests {
         }
         // Fibonacci echo çözümü fib problemini geçmeli.
         assert!(scored.iter().any(|(_, rs)| rs[0].success));
+    }
+
+    #[test]
+    fn next_generation_does_not_accumulate_hints() {
+        // 4 jenerasyon ilerlet; her jenerasyonda prompt'ta tek bir not olmalı.
+        let pm = PopulationManager::new(4, 1);
+        let mut agents: Vec<Agent> = (0..4).map(|i| Agent::new(format!("a{i}"))).collect();
+        agents[0].fitness_score = 100.0; // elit + mükemmel
+        agents[1].fitness_score = 50.0;
+        agents[2].fitness_score = 30.0;
+        agents[3].fitness_score = 10.0;
+
+        for _ in 0..4 {
+            let parents = pm.select_parents_tournament(&agents, 3, 4);
+            agents = pm.next_generation(&agents, &parents);
+            for a in &agents {
+                let hints = a
+                    .system_prompt
+                    .lines()
+                    .filter(|l| l.starts_with("[keşif notu g"))
+                    .count();
+                assert!(hints <= 1, "not birikti ({}): {}", hints, a.system_prompt);
+            }
+        }
     }
 }

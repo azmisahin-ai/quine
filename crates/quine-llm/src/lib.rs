@@ -36,10 +36,25 @@ impl LlmRequest {
             model: model.into(),
             system: system.into(),
             prompt: prompt.into(),
-            temperature: 0.2,
+            temperature: temperature_from_env(),
             max_tokens: 1024,
         }
     }
+}
+
+/// Sampling sıcaklığını `QUINE_TEMPERATURE` ortam değişkeninden okur.
+///
+/// Varsayılan `0.2`. `0.0` verildiğinde model deterministik/tekrarlanabilir
+/// çıktı üretir — evrim ölçümlerinde gürültüyü elemek için kullanışlıdır.
+/// Geçersiz veya `[0.0, 2.0]` dışı değerler varsayılana düşer.
+pub fn temperature_from_env() -> f32 {
+    parse_temperature(std::env::var("QUINE_TEMPERATURE").ok().as_deref())
+}
+
+fn parse_temperature(raw: Option<&str>) -> f32 {
+    raw.and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|t| (0.0..=2.0).contains(t))
+        .unwrap_or(0.2)
 }
 
 /// LLM'den dönen yanıt.
@@ -493,6 +508,18 @@ mod tests {
         let code = r.extract_code();
         assert!(code.contains("pub fn a"), "got: {code:?}");
         assert!(!code.contains("print"), "python bloğu alınmamalı: {code:?}");
+    }
+
+    #[test]
+    fn parse_temperature_defaults_and_validates() {
+        assert_eq!(parse_temperature(None), 0.2);
+        assert_eq!(parse_temperature(Some("0.0")), 0.0);
+        assert_eq!(parse_temperature(Some("0.7")), 0.7);
+        assert_eq!(parse_temperature(Some(" 1.5 ")), 1.5);
+        // Geçersiz / aralık dışı → varsayılan.
+        assert_eq!(parse_temperature(Some("abc")), 0.2);
+        assert_eq!(parse_temperature(Some("-1")), 0.2);
+        assert_eq!(parse_temperature(Some("9.9")), 0.2);
     }
 
     #[test]
