@@ -99,8 +99,25 @@ Yeni problem eklerken `quine-bench-simple` içinde hem çözücü stub'ı hem
 | `QUINE_TEST_DOCKER` | (yok) | `1` → docker entegrasyon testi çalışır |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama adresi |
 
+## Mimari Sınırlar (önemli — yanlış varsayıma düşme)
+
+- **"Öz-değişiklik" = prompt mutasyonu, kaynak kod değil.** Faz 2 (`evolve`)
+  ajanın `system_prompt`'unu günceller. **Kaynak kodunu değiştirme (CodeMutation,
+  Faz 4) henüz YAZILMADI.** `MASTER_PLAN.md` Faz 4'te planlı.
+- **Problem seti artık gömülü değil.** Harness `function_signature` stub'ından
+  türetilir (`quine-eval::parse_signature`); `run-once/evolve --problem-file x.json`
+  ile dış problem verilebilir. Beklenen çıktılar `test_cases`'ten gelir.
+- **Harness std-only derlenir** (düz `rustc`, harici crate yok) → JSON elle
+  çözülür. Desteklenen tipler `arg_expr`/`out_expr` içinde listeli; yeni tip
+  gerekirse ikisine de ekle. Desteklenmeyen tip → net hata (sessiz geçmez).
+- **`data/config.json` runtime'da okunur**; öncelik: env > config > varsayılan.
+- **Evrim yakınsamıyorsa önce model kapasitesini sorgula.** 1.5b, `u32→u64
+  product` gibi tip hatalarını düzeltemiyor; bu framework değil model sınırı.
+  `QUINE_TEMPERATURE=0.0` ile ölçüm tekrarlanabilir olur.
+
 ## Devam Eden / Sonraki İşler
 
-`docs/EXECUTION_PLAN.md` → "Sonraki Faz" bölümüne bak. B0–B5 tamamlandı
+`docs/EXECUTION_PLAN.md` → "Sonraki Faz" bölümüne bak. B0–B7 tamamlandı
 (git temizliği, CI, `extract_code`, entegrasyon testleri, docker E2E, evrim
-ölçümü). Açık: daha büyük model (`7b`) ile karşılaştırmalı benchmark.
+ölçümü, config runtime, dış problem desteği, evrim prompt kalitesi).
+Açık: daha büyük model (`7b`) ile karşılaştırma; **Faz 4 CodeMutation**.
