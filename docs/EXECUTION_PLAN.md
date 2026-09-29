@@ -1,6 +1,6 @@
 # 📋 QUINE: YÜRÜTME PLANI (EXECUTION PLAN)
 
-> **Durum:** V1.0 — Doğrulama ve Sertleştirme turu
+> **Durum:** V1.1 — Doğrulama + Sertleştirme (B fazı tamam)
 > **Başlangıç:** 2026-09-29
 > **Kapsam:** Bu dosya, `docs/MASTER_PLAN.md`'deki mimarinin **gerçekten
 > çalıştığını kanıtlamak** ve eksik operasyonel dosyaları tamamlamak için
@@ -55,6 +55,31 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 | **A10** | Dosyalar | `docker-compose.yml`, `Dockerfile`, `scripts/setup-dev.sh` | `docker compose config` geçer | ✅ |
 | **A11** | Doküman | `README.md`, `EXECUTION_PLAN.md`, `AGENTS.md` | Okuyan çalıştırabilir | ✅ |
 
+### B fazı — Sertleştirme (2026-09-29 devam)
+
+| # | Adım | Görev | Kabul Kriteri | Durum |
+|---|------|-------|---------------|:-----:|
+| **B0** | Temizlik | `target/` git geçmişinden çıkarıldı | Taze clone < 1 MB | ✅ |
+| **B1** | CI | GitHub Actions (`fmt`+`clippy`+`test`+E2E sim) | Workflow geçerli, adımlar yerelde geçer | ✅ |
+| **B2** | Sertleştirme | `extract_code` + regresyon testleri | 9 llm testi geçer, gerçek LLM 3/3 | ✅ |
+| **B3** | Test | `crates/quine-cli/tests/integration.rs` | 6 entegrasyon testi geçer | ✅ |
+
+### B0 detayı (git geçmişi temizliği)
+- `target/` (1444 artifact, ~143 MB) yanlışlıkla repoya commit edilmişti;
+  `.gitignore` kuralı eklenmeden önce eklendiği için git izlemeye devam ediyordu.
+- `git filter-repo --path target --invert-paths` ile **tüm geçmişten** silindi.
+- Sonuç: pack boyutu **143.55 MiB → 78.72 KiB**; taze clone **636 KB**.
+- Not: Geçmiş yeniden yazıldığı için SHA'lar değişti → `git push --force` gerekir.
+
+### B2 detayı (`extract_code` sertleştirme)
+- ` thinking` / `<thinking>` blokları temizlenir (Qwen dahil).
+- Yalnızca ```` ```rust ```` fence'leri tercih edilir; diğer diller atlanır.
+- Fence yoksa ham metinden ilk fonksiyon gövdesi (süslü parantez dengesi) ayıklanır
+  → açıklama metninin koda karışıp derlemeyi bozması engellenir.
+- 5 yeni regresyon testi; gerçek LLM ile fib-001/sum-003/rev-002 → 100/100.
+- `quine-llm` test sayısı: 4 → 9.
+
+
 ### A6 detayı
 - `cargo fmt --check` başlangıçta `quine-bench-simple/src/lib.rs` içinde stil
   uyumsuzlukları raporladı → `cargo fmt` ile düzeltildi.
@@ -82,16 +107,34 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 
 | Risk | Açıklama | Öneri |
 |------|----------|-------|
-| Küçük model kod karıştırması | 1.5B model bazen kod bloğu dışına metin koyar | Daha büyük model (`7b`) kullan veya `extract_code`'u sıkılaştır |
-| `extract_code` dayanıklılığı | Kod bloğu yoksa ham içeriği döndürür | Gelecekte: blok içi `pub fn` imzasına göre filtrele |
-| Docker sandbox | Varsayılan `local`; `docker` modu gerçek CI'da test edilmeli | `QUINE_SANDBOX=docker` ile E2E koş |
-| Think-block temizliği | Bazı modeller `thinking` etiketi basar | `extract_code` içinde temizle |
+| Küçük model kod karıştırması | 1.5B model bazen kod bloğu dışına metin koyar | ✅ B2'de `extract_code` sertleştirildi; hâlâ daha büyük model (`7b`) daha iyi olur |
+| `extract_code` dayanıklılığı | Kod bloğu yoksa ham içeriği döndürür | ✅ B2: think-block temizliği + `rust` fence tercihi + fence'siz fonksiyon ayıklama |
+| Docker sandbox | Varsayılan `local`; `docker` modu gerçek CI'da test edilmeli | `QUINE_SANDBOX=docker` ile E2E koş (açık) |
+| Think-block temizliği | Bazı modeller `thinking` etiketi basar | ✅ B2: `extract_code` içinde temizleniyor |
 
 ---
 
 ## 📌 Sonraki Faz (Öneri)
 
+- [x] `cargo test --test integration` entegrasyon test dosyası ekle. (B3)
+- [x] `extract_code`'u muhafazakâr hale getir + regresyon testi. (B2)
+- [x] CI (GitHub Actions): `fmt`, `clippy`, `test`, `--simulate` E2E. (B1)
 - [ ] `QUINE_SANDBOX=docker` ile uçtan uca değerlendirme testi.
-- [ ] `cargo test --test integration` entegrasyon test dosyası ekle.
-- [ ] `extract_code`'u çok-örnekli/muhafazakâr hale getir + regresyon testi.
-- [ ] CI (GitHub Actions): `fmt`, `clippy`, `test`, `--simulate` E2E.
+- [ ] Çok-ajanlı gerçek LLM senaryosu (`population evolve`) + fitness artışı ölçümü.
+- [ ] Daha büyük model (`qwen2.5-coder:7b`) ile karşılaştırmalı benchmark.
+
+---
+
+## 🧪 Test Özeti (güncel)
+
+| Katman | Test sayısı | Durum |
+|--------|:-----------:|:-----:|
+| `quine-common` | 3 | ✅ |
+| `quine-llm` | 9 | ✅ |
+| `quine-guardian` | 6 | ✅ |
+| `quine-eval` | 6 | ✅ |
+| `quine-evolution` | 6 | ✅ |
+| `quine-bench-simple` | 8 | ✅ |
+| `integration` (quine-cli) | 6 | ✅ |
+| **Toplam** | **44** | ✅ |
+
