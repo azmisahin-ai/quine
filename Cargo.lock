@@ -690,6 +690,7 @@ dependencies = [
  "quine-llm",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
