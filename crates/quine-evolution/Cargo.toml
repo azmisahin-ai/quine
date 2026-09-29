@@ -1,0 +1,23 @@
+[package]
+name = "quine-evolution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Quine: popülasyon, seçilim ve mutasyon motoru (Faz 2-3)"
+
+[dependencies]
+quine-common.workspace = true
+quine-llm.workspace = true
+quine-eval.workspace = true
+quine-bench-simple.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rand.workspace = true
+uuid.workspace = true
+chrono.workspace = true
