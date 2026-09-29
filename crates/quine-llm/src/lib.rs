@@ -27,7 +27,11 @@ pub struct LlmRequest {
 }
 
 impl LlmRequest {
-    pub fn new(model: impl Into<String>, system: impl Into<String>, prompt: impl Into<String>) -> Self {
+    pub fn new(
+        model: impl Into<String>,
+        system: impl Into<String>,
+        prompt: impl Into<String>,
+    ) -> Self {
         Self {
             model: model.into(),
             system: system.into(),
@@ -92,8 +96,9 @@ pub trait LlmBackend: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LlmResponse>> + Send + 'a>>;
 
     /// Backend'e erişilebilir mi? (Faz 0 kabul kriteri bunu kullanır.)
-    fn health_check(&self)
-        -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>;
+    fn health_check(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,8 +159,7 @@ struct OllamaTagModel {
 impl OllamaBackend {
     /// Ortam değişkenlerinden (`OLLAMA_HOST`, `QUINE_MODEL`) backend kurar.
     pub fn from_env() -> Self {
-        let host =
-            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| DEFAULT_OLLAMA_HOST.to_string());
+        let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| DEFAULT_OLLAMA_HOST.to_string());
         let model = std::env::var("QUINE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         Self::new(host, model)
     }
@@ -216,8 +220,7 @@ impl LlmBackend for OllamaBackend {
     fn generate<'a>(
         &'a self,
         request: &'a LlmRequest,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LlmResponse>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LlmResponse>> + Send + 'a>> {
         Box::pin(self.generate_impl(request))
     }
 
@@ -305,8 +308,7 @@ impl LlmBackend for EchoBackend {
     fn generate<'a>(
         &'a self,
         request: &'a LlmRequest,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LlmResponse>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LlmResponse>> + Send + 'a>> {
         Box::pin(async move {
             Ok(LlmResponse {
                 content: self.canned_response.clone(),

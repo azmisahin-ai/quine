@@ -48,7 +48,11 @@ impl<'a, B: LlmBackend + ?Sized> MutationEngine<'a, B> {
             ),
         );
 
-        let resp = self.llm.generate(&request).await.context("mutasyon LLM isteği")?;
+        let resp = self
+            .llm
+            .generate(&request)
+            .await
+            .context("mutasyon LLM isteği")?;
         let new_prompt = strip_markdown(resp.content.trim());
         if new_prompt.is_empty() {
             anyhow::bail!("LLM boş prompt döndürdü");
@@ -90,7 +94,11 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 fn strip_markdown(s: &str) -> String {
-    s.trim().trim_start_matches("```").trim_end_matches("```").trim().to_string()
+    s.trim()
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -113,9 +121,7 @@ pub struct Archive {
 
 impl Archive {
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-        }
+        Self { path: path.into() }
     }
 
     pub fn default_location() -> Self {
@@ -323,7 +329,9 @@ pub async fn evaluate_population(
                 let mut results = Vec::new();
                 let mut agent = agent;
                 for p in problems {
-                    match evaluate_agent(llm.clone(), ev.clone(), agent.clone(), p, model.clone()).await {
+                    match evaluate_agent(llm.clone(), ev.clone(), agent.clone(), p, model.clone())
+                        .await
+                    {
                         Ok((a, r)) => {
                             agent = a;
                             results.push(r);
@@ -366,7 +374,10 @@ mod tests {
         strong.fitness_score = 99.0;
         let picks = pm.select_parents_roulette(&[weak.clone(), strong.clone()], 200);
         let strong_count = picks.iter().filter(|id| **id == strong.id).count();
-        assert!(strong_count > 150, "rulet fitness'ı takip etmeli: {strong_count}/200");
+        assert!(
+            strong_count > 150,
+            "rulet fitness'ı takip etmeli: {strong_count}/200"
+        );
     }
 
     #[test]
@@ -381,7 +392,11 @@ mod tests {
         // a'nin hic cekilmeme olasiligi ~1/256 — pratikte tum secimler b olmali.
         // Yine de nadir randomness'e karsi toleransli dogrulama: >= %90 b secilmeli.
         let b_count = picks.iter().filter(|id| **id == b.id).count();
-        assert!(b_count * 10 >= picks.len() * 9, "turnuva en fit'i secmedi: {b_count}/{}", picks.len());
+        assert!(
+            b_count * 10 >= picks.len() * 9,
+            "turnuva en fit'i secmedi: {b_count}/{}",
+            picks.len()
+        );
     }
 
     #[test]
@@ -437,7 +452,10 @@ mod tests {
         let mut r = r;
         r.success = false;
         r.stderr = "expected 55 got 89".into();
-        let new_prompt = engine.refine_prompt(&agent, "fake-model", &[r]).await.unwrap();
+        let new_prompt = engine
+            .refine_prompt(&agent, "fake-model", &[r])
+            .await
+            .unwrap();
         assert!(new_prompt.contains("kenar durumları"));
         assert!(!new_prompt.contains("```"));
     }

@@ -113,9 +113,7 @@ fn model_name(simulate: bool) -> String {
 fn build_evaluator() -> Arc<Evaluator> {
     let sandbox = quine_eval::sandbox_from_env();
     tracing::info!("sandbox: {}", sandbox.kind());
-    Arc::new(
-        Evaluator::new(sandbox).with_audit(AuditLog::new(data_path("audit.log"))),
-    )
+    Arc::new(Evaluator::new(sandbox).with_audit(AuditLog::new(data_path("audit.log"))))
 }
 
 fn data_path(name: &str) -> PathBuf {
@@ -123,16 +121,18 @@ fn data_path(name: &str) -> PathBuf {
 }
 
 fn select_problem(id: &str) -> Result<quine_common::Problem> {
-    quine_bench_simple::SimpleBenchmark::problem(id)
-        .with_context(|| format!("bilinmeyen problem '{id}'. Geçerliler: fib-001, rev-002, sum-003"))
+    quine_bench_simple::SimpleBenchmark::problem(id).with_context(|| {
+        format!("bilinmeyen problem '{id}'. Geçerliler: fib-001, rev-002, sum-003")
+    })
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn,quine_cli=info,quine_evolution=info,quine_eval=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "warn,quine_cli=info,quine_evolution=info,quine_eval=info".into()
+            }),
         )
         .init();
 
@@ -142,9 +142,10 @@ async fn main() -> Result<()> {
         Commands::Init => cmd_init(),
         Commands::TestLlm { prompt } => cmd_test_llm(cli.simulate, prompt).await,
         Commands::RunOnce { problem } => cmd_run_once(cli.simulate, &problem).await,
-        Commands::Evolve { iterations, problem } => {
-            cmd_evolve(cli.simulate, iterations, &problem).await
-        }
+        Commands::Evolve {
+            iterations,
+            problem,
+        } => cmd_evolve(cli.simulate, iterations, &problem).await,
         Commands::Population(PopulationCommands::Evolve { generations, size }) => {
             cmd_population_evolve(cli.simulate, generations, size).await
         }
@@ -212,10 +213,17 @@ async fn cmd_run_once(simulate: bool, problem_id: &str) -> Result<()> {
     let mut agent = Agent::new(format!("run-once-{}", problem.id));
     println!(
         "🤖 Ajan '{}' problem '{}' üzerinde çalışıyor (backend={}, model={})…",
-        agent.name, problem.id, backend.name(), model
+        agent.name,
+        problem.id,
+        backend.name(),
+        model
     );
 
-    let req = LlmRequest::new(model.clone(), agent.system_prompt.clone(), problem.to_llm_prompt());
+    let req = LlmRequest::new(
+        model.clone(),
+        agent.system_prompt.clone(),
+        problem.to_llm_prompt(),
+    );
     let resp = backend.generate(&req).await.context("çözüm üretimi")?;
     let code = resp.extract_code();
 
@@ -225,9 +233,15 @@ async fn cmd_run_once(simulate: bool, problem_id: &str) -> Result<()> {
     println!("🧾 Kod:\n{}\n", indent(&code));
     println!("📊 Sonuç: {}", serde_json::to_string_pretty(&result)?);
     if result.success {
-        println!("✅ EvaluationResult {{ success: true, score: {:.1} }}", result.score);
+        println!(
+            "✅ EvaluationResult {{ success: true, score: {:.1} }}",
+            result.score
+        );
     } else {
-        println!("❌ Başarısız (score {:.1}, {}/{})", result.score, result.tests_passed, result.tests_total);
+        println!(
+            "❌ Başarısız (score {:.1}, {}/{})",
+            result.score, result.tests_passed, result.tests_total
+        );
     }
 
     // Sonucu data/runs altına kalıcı yaz (ampirik doğrulama ilkesi).
@@ -252,8 +266,15 @@ async fn cmd_evolve(simulate: bool, iterations: u32, problem_id: &str) -> Result
     let mut last_failures = Vec::new();
 
     for i in 1..=iterations {
-        println!("— iterasyon {i}/{iterations} (jenerasyon {}, fitness {:.1}) —", agent.generation, agent.fitness_score);
-        let req = LlmRequest::new(model.clone(), agent.system_prompt.clone(), problem.to_llm_prompt());
+        println!(
+            "— iterasyon {i}/{iterations} (jenerasyon {}, fitness {:.1}) —",
+            agent.generation, agent.fitness_score
+        );
+        let req = LlmRequest::new(
+            model.clone(),
+            agent.system_prompt.clone(),
+            problem.to_llm_prompt(),
+        );
         let resp = backend.generate(&req).await.context("çözüm üretimi")?;
         let code = resp.extract_code();
         let result = evaluator.evaluate(agent.id, &problem, &code).await;
@@ -288,7 +309,10 @@ async fn cmd_evolve(simulate: bool, iterations: u32, problem_id: &str) -> Result
             }
         }
     }
-    println!("⚠️ {} iterasyon sonunda problem hâlâ çözülmedi (fitness {:.1}).", iterations, agent.fitness_score);
+    println!(
+        "⚠️ {} iterasyon sonunda problem hâlâ çözülmedi (fitness {:.1}).",
+        iterations, agent.fitness_score
+    );
     Ok(())
 }
 
@@ -338,7 +362,10 @@ async fn cmd_population_evolve(simulate: bool, generations: u32, size: usize) ->
         } else {
             agents.iter().map(|a| a.fitness_score).sum::<f64>() / agents.len() as f64
         };
-        let best = agents.iter().map(|a| a.fitness_score).fold(0.0f64, f64::max);
+        let best = agents
+            .iter()
+            .map(|a| a.fitness_score)
+            .fold(0.0f64, f64::max);
         println!("jenerasyon {gen}: ortalama fitness {avg:.1}, en iyi {best:.1}");
 
         // Başarılı olanları arşivle (Adım 3.1).
@@ -363,7 +390,10 @@ fn cmd_population_show() -> Result<()> {
         println!("Arşiv boş (data/archive.json). Önce `quine population evolve` çalıştırın.");
         return Ok(());
     }
-    println!("{:<38} {:<16} {:>4} {:>8}", "AGENT ID", "NAME", "GEN", "FITNESS");
+    println!(
+        "{:<38} {:<16} {:>4} {:>8}",
+        "AGENT ID", "NAME", "GEN", "FITNESS"
+    );
     for e in &entries {
         println!(
             "{:<38} {:<16} {:>4} {:>8.1}",
@@ -385,10 +415,17 @@ fn cmd_guard(cmd: GuardCommands) -> Result<()> {
     let audit = AuditLog::default_location();
     match analyzer.analyze(&content) {
         Ok(()) => {
-            audit.record(AuditDecision::Allowed, None, &format!("guard check {}", file.display()))?;
+            audit.record(
+                AuditDecision::Allowed,
+                None,
+                &format!("guard check {}", file.display()),
+            )?;
             println!("✅ Guardian: '{}' temiz.", file.display());
             for f in analyzer.scan(&content) {
-                println!("   ⚠ uyarı [{}] satır {}: {}", f.rule, f.line_number, f.excerpt);
+                println!(
+                    "   ⚠ uyarı [{}] satır {}: {}",
+                    f.rule, f.line_number, f.excerpt
+                );
             }
             Ok(())
         }
@@ -409,5 +446,8 @@ fn chrono_tag() -> String {
 }
 
 fn indent(s: &str) -> String {
-    s.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")
+    s.lines()
+        .map(|l| format!("    {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

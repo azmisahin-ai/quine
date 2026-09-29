@@ -37,10 +37,22 @@ pub fn fibonacci() -> Problem {
             .into(),
         function_signature: "pub fn fibonacci(n: u32) -> u64 { todo!() }".into(),
         test_cases: vec![
-            TestCase { input: json!(0), expected: json!(0) },
-            TestCase { input: json!(1), expected: json!(1) },
-            TestCase { input: json!(10), expected: json!(55) },
-            TestCase { input: json!(20), expected: json!(6765) },
+            TestCase {
+                input: json!(0),
+                expected: json!(0),
+            },
+            TestCase {
+                input: json!(1),
+                expected: json!(1),
+            },
+            TestCase {
+                input: json!(10),
+                expected: json!(55),
+            },
+            TestCase {
+                input: json!(20),
+                expected: json!(6765),
+            },
         ],
     }
 }
@@ -55,10 +67,22 @@ pub fn string_reverse() -> Problem {
             .into(),
         function_signature: "pub fn reverse_string(s: &str) -> String { todo!() }".into(),
         test_cases: vec![
-            TestCase { input: json!(""), expected: json!("") },
-            TestCase { input: json!("abc"), expected: json!("cba") },
-            TestCase { input: json!("quine"), expected: json!("eniuq") },
-            TestCase { input: json!("ayşe"), expected: json!("eşya") },
+            TestCase {
+                input: json!(""),
+                expected: json!(""),
+            },
+            TestCase {
+                input: json!("abc"),
+                expected: json!("cba"),
+            },
+            TestCase {
+                input: json!("quine"),
+                expected: json!("eniuq"),
+            },
+            TestCase {
+                input: json!("ayşe"),
+                expected: json!("eşya"),
+            },
         ],
     }
 }
@@ -73,10 +97,22 @@ pub fn list_sum() -> Problem {
             .into(),
         function_signature: "pub fn list_sum(xs: &[i64]) -> i64 { todo!() }".into(),
         test_cases: vec![
-            TestCase { input: json!([]), expected: json!(0) },
-            TestCase { input: json!([1, 2, 3]), expected: json!(6) },
-            TestCase { input: json!([-5, 5]), expected: json!(0) },
-            TestCase { input: json!([1000000, 2000000, 3000000]), expected: json!(6000000) },
+            TestCase {
+                input: json!([]),
+                expected: json!(0),
+            },
+            TestCase {
+                input: json!([1, 2, 3]),
+                expected: json!(6),
+            },
+            TestCase {
+                input: json!([-5, 5]),
+                expected: json!(0),
+            },
+            TestCase {
+                input: json!([1000000, 2000000, 3000000]),
+                expected: json!(6000000),
+            },
         ],
     }
 }
@@ -135,10 +171,7 @@ fn indent_llm_slot() -> String {
 
 /// Placeholder'ı gerçek LLM koduyla değiştirir. Kodu 4空格 girintiyle sarar.
 pub fn inject_solution(harness: &str, llm_code: &str) -> String {
-    let indented: String = llm_code
-        .lines()
-        .map(|l| format!("    {l}\n"))
-        .collect();
+    let indented: String = llm_code.lines().map(|l| format!("    {l}\n")).collect();
     harness.replace("    // __QUINE_SOLUTION__\n", &indented)
 }
 
@@ -210,6 +243,9 @@ mod tests {
     fn string_reverse_expected_is_correct() {
         let p = string_reverse();
         let outs: Vec<_> = p.test_cases.iter().map(|t| t.expected.as_str()).collect();
-        assert_eq!(outs, vec![Some(""), Some("cba"), Some("eniuq"), Some("eşya")]);
+        assert_eq!(
+            outs,
+            vec![Some(""), Some("cba"), Some("eniuq"), Some("eşya")]
+        );
     }
 }

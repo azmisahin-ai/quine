@@ -202,9 +202,7 @@ pub struct AuditLog {
 
 impl AuditLog {
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-        }
+        Self { path: path.into() }
     }
 
     /// Varsayılan konum: `data/audit.log`.
@@ -213,7 +211,12 @@ impl AuditLog {
     }
 
     /// Kaydı append eder. Dosyanın bulunduğu dizini oluşturur.
-    pub fn record(&self, decision: AuditDecision, agent_id: Option<&str>, detail: &str) -> std::io::Result<()> {
+    pub fn record(
+        &self,
+        decision: AuditDecision,
+        agent_id: Option<&str>,
+        detail: &str,
+    ) -> std::io::Result<()> {
         use std::io::Write;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -228,7 +231,11 @@ impl AuditLog {
             .create(true)
             .append(true)
             .open(&self.path)?;
-        writeln!(f, "{}", serde_json::to_string(&rec).expect("audit record serializes"))
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&rec).expect("audit record serializes")
+        )
     }
 }
 
@@ -285,7 +292,9 @@ mod tests {
     fn diff_mode_scans_only_added_lines() {
         let analyzer = DiffAnalyzer::default().with_diff_mode();
         let diff = "--- a/x.rs\n+++ b/x.rs\n-let old = 1;\n+unsafe { core::mem::zeroed() }";
-        let err = analyzer.analyze(diff).expect_err("added unsafe line blocked");
+        let err = analyzer
+            .analyze(diff)
+            .expect_err("added unsafe line blocked");
         assert_eq!(err.violations.len(), 1);
         assert_eq!(err.violations[0].rule, "unsafe-block");
     }
@@ -307,7 +316,8 @@ mod tests {
         let log = AuditLog::new(dir.join("audit.log"));
         log.record(AuditDecision::Blocked, Some("agent-1"), "unsafe detected")
             .unwrap();
-        log.record(AuditDecision::Allowed, None, "clean diff").unwrap();
+        log.record(AuditDecision::Allowed, None, "clean diff")
+            .unwrap();
         let content = std::fs::read_to_string(dir.join("audit.log")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2);

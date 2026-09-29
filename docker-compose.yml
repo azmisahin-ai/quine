@@ -1,0 +1,47 @@
+# Quine geliştirme/çalıştırma ortamı.
+#
+# Yerel LLM (Ollama) + isteğe bağlı Quine CLI servisi.
+# Kullanım:
+#   docker compose up -d ollama
+#   docker compose exec ollama ollama pull qwen2.5-coder:1.5b
+#   cargo run --bin quine -- test-llm
+#
+# Sandbox için Docker sandbox'ı kullanmak isterseniz:
+#   QUINE_SANDBOX=docker cargo run --bin quine -- run-once
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: quine-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # Quine CLI'ı konteynerde çalıştırmak isteyenler için (opsiyonel).
+  # `docker compose run --rm quine run-once` ile kullanılır.
+  quine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quine-cli
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      QUINE_MODEL: ${QUINE_MODEL:-qwen2.5-coder:1.5b}
+      QUINE_SANDBOX: ${QUINE_SANDBOX:-local}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+    profiles: ["cli"]
+
+volumes:
+  ollama:

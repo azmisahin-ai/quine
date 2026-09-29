@@ -112,7 +112,11 @@ fn build_harness_source(problem: &Problem) -> Result<String> {
 
     let (typed, parse_fn, call) = match problem.id.as_str() {
         "fib-001" => ("u64", "parse_u64", "solution::fibonacci(input as u32)"),
-        "rev-002" => ("String", "parse_string", "json_str(&solution::reverse_string(&input))"),
+        "rev-002" => (
+            "String",
+            "parse_string",
+            "json_str(&solution::reverse_string(&input))",
+        ),
         "sum-003" => ("Vec<i64>", "parse_i64_array", "solution::list_sum(&input)"),
         _ => return Err(anyhow!("bilinmeyen problem id: {}", problem.id)),
     };
@@ -326,7 +330,10 @@ fn compact_json(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => json_quote(s),
         serde_json::Value::Array(items) => {
-            let parts: Vec<String> = items.iter().map(|i| i.as_i64().unwrap_or(0).to_string()).collect();
+            let parts: Vec<String> = items
+                .iter()
+                .map(|i| i.as_i64().unwrap_or(0).to_string())
+                .collect();
             format!("[{}]", parts.join(","))
         }
         other => other.to_string(),
@@ -440,9 +447,7 @@ impl DockerSandbox {
             .args([
                 "sh",
                 "-c",
-                &format!(
-                    "timeout {secs} sh -c 'rustc --edition 2021 -o /tmp/h main.rs && /tmp/h'"
-                ),
+                &format!("timeout {secs} sh -c 'rustc --edition 2021 -o /tmp/h main.rs && /tmp/h'"),
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -463,8 +468,14 @@ impl DockerSandbox {
         match run {
             Ok(o) => {
                 let o = o.context("docker süreci beklenemedi")?;
-                output.stdout = truncate(&String::from_utf8_lossy(&o.stdout), self.limits.max_output_bytes);
-                output.stderr = truncate(&String::from_utf8_lossy(&o.stderr), self.limits.max_output_bytes);
+                output.stdout = truncate(
+                    &String::from_utf8_lossy(&o.stdout),
+                    self.limits.max_output_bytes,
+                );
+                output.stderr = truncate(
+                    &String::from_utf8_lossy(&o.stderr),
+                    self.limits.max_output_bytes,
+                );
                 output.exit_code = o.status.code();
             }
             Err(_) => output.timed_out = true,
@@ -509,7 +520,12 @@ impl Evaluator {
     }
 
     /// Faz 1 kabul kriteri: evaluate → EvaluationResult { success, score }.
-    pub async fn evaluate(&self, agent_id: Uuid, problem: &Problem, llm_code: &str) -> EvaluationResult {
+    pub async fn evaluate(
+        &self,
+        agent_id: Uuid,
+        problem: &Problem,
+        llm_code: &str,
+    ) -> EvaluationResult {
         // 1) Guardian kapısı: tehlikeli kod sandbox'a hiç gitmez.
         if let Err(violation) = self.guardian.analyze(llm_code) {
             self.audit(AuditDecision::Blocked, agent_id, &violation.to_string());
@@ -526,7 +542,11 @@ impl Evaluator {
                 evaluated_at: Utc::now(),
             };
         }
-        self.audit(AuditDecision::Allowed, agent_id, "code passed guardian scan");
+        self.audit(
+            AuditDecision::Allowed,
+            agent_id,
+            "code passed guardian scan",
+        );
 
         // 2) Sandbox'ta derle & çalıştır.
         let run = match self.sandbox.run_solution(problem, llm_code).await {
