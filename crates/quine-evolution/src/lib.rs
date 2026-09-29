@@ -25,8 +25,12 @@ impl<'a, B: LlmBackend + ?Sized> MutationEngine<'a, B> {
         Self { llm }
     }
 
-    /// "Bu hatayı düzeltmek için prompt'u nasıl güncellemeliyim?" sorgusunu
-    /// LLM'e sorar ve ajanın yeni sistem prompt'unu döner.
+    /// "Bu hatayı düzeltmek için hangi kural eklenmeli?" sorgusunu LLM'e sorar
+    /// ve ajanın **mevcut prompt'unu koruyarak** yeni kuralı ekler.
+    ///
+    /// Tüm prompt'u yeniden yazdırmak yerine tek bir kısa kural eklenir; bu,
+    /// küçük modellerin iyi taban prompt'u bozmasını (prompt'un çökmesini)
+    /// engeller ve öğrenilen derslerin birikmesini sağlar.
     pub async fn refine_prompt(
         &self,
         agent: &Agent,
@@ -36,15 +40,14 @@ impl<'a, B: LlmBackend + ?Sized> MutationEngine<'a, B> {
         let failure_report = summarize_failures(failures);
         let request = LlmRequest::new(
             model,
-            "Sen bir prompt mühendisisisin. Bir kodlama ajanının başarısızlıklarını \
-             analiz edip, bir sonraki denemede aynı hataları yapmaması için onun sistem \
-             prompt'unu iyileştirirsin. Yalnızca yeni sistem prompt metnini döndür; \
-             açıklama veya markdown işareti kullanma.",
+            "Sen bir prompt mühendisisin. Bir kodlama ajanının başarısızlığını \
+             analiz edip, aynı hatayı bir daha yapmaması için TEK ve KISA bir Rust \
+             kuralı yazarsın. Yalnızca kural cümlesini döndür (tek satır, 200 \
+             karakterden kısa); açıklama veya markdown işareti kullanma.",
             format!(
-                "# Mevcut Sistem Prompt'u\n{}\n\n# Son Değerlendirme Raporu\n{}\n\n\
-                 Yukarıdaki hataları göz önüne alarak sistem prompt'unu güncelle. \
-                 Kısa, somut ve Rust odaklı kurallar ekle.",
-                agent.system_prompt, failure_report
+                "# Son Değerlendirme Raporu\n{}\n\n\
+                 Bu hatayı önleyecek tek, somut ve kısa bir Rust kuralı yaz.",
+                failure_report
             ),
         );
 
@@ -53,11 +56,45 @@ impl<'a, B: LlmBackend + ?Sized> MutationEngine<'a, B> {
             .generate(&request)
             .await
             .context("mutasyon LLM isteği")?;
-        let new_prompt = strip_markdown(resp.content.trim());
-        if new_prompt.is_empty() {
-            anyhow::bail!("LLM boş prompt döndürdü");
+        let rule = strip_markdown(resp.content.trim())
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(200)
+            .collect::<String>();
+        if rule.is_empty() {
+            anyhow::bail!("LLM boş kural döndürdü");
         }
-        Ok(new_prompt)
+
+        // Taban prompt korunur; yalnızca `[ders]` satırları yönetilir
+        // (yinelenen eklenmez, en fazla 8 tanesi tutulur).
+        let mut rules: Vec<String> = agent
+            .system_prompt
+            .lines()
+            .filter(|l| l.trim_start().starts_with("[ders]"))
+            .map(|l| l.trim().to_string())
+            .collect();
+        let new_rule = format!("[ders] {rule}");
+        if !rules.contains(&new_rule) {
+            rules.push(new_rule);
+        }
+        if rules.len() > 8 {
+            rules.drain(0..rules.len() - 8);
+        }
+        let base: String = agent
+            .system_prompt
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("[ders]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut updated = base.trim_end().to_string();
+        if !rules.is_empty() {
+            updated.push('\n');
+            updated.push_str(&rules.join("\n"));
+        }
+        Ok(updated)
     }
 }
 
@@ -468,6 +505,33 @@ mod tests {
             .unwrap();
         assert!(new_prompt.contains("kenar durumları"));
         assert!(!new_prompt.contains("```"));
+    }
+
+    #[tokio::test]
+    async fn refine_prompt_preserves_base_and_accumulates_rules() {
+        let llm = EchoBackend::new("Taşma olmaması için u64 kullan.");
+        let engine = MutationEngine::new(&llm);
+        let agent = Agent::new("birikim");
+        let mut r = EvaluationResult::perfect("ext-factorial", agent.id, 1);
+        r.success = false;
+        r.stderr = "error[E0277]: u32 -> u64".into();
+
+        let first = engine
+            .refine_prompt(&agent, "m", &[r.clone()])
+            .await
+            .unwrap();
+        // Taban prompt korunmalı (küçük modelin çökertmesi engellenir).
+        assert!(first.contains("deneyimli bir Rust geliştiricisisin"));
+        assert!(first.contains("[ders] Taşma olmaması"));
+
+        // İkinci tur: yeni ders eklenir, eskisi kaybolmaz.
+        let agent2 = agent.mutate_prompt(first);
+        let llm2 = EchoBackend::new("Sonucu açıkça döndür, gereksiz döngü kurma.");
+        let engine2 = MutationEngine::new(&llm2);
+        let second = engine2.refine_prompt(&agent2, "m", &[r]).await.unwrap();
+        assert!(second.contains("[ders] Taşma olmaması"));
+        assert!(second.contains("[ders] Sonucu açıkça döndür"));
+        assert!(second.contains("deneyimli bir Rust geliştiricisisin"));
     }
 
     #[tokio::test]

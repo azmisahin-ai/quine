@@ -67,6 +67,7 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 | **B5** | Evrim | Gerçek LLM çok-ajanlı popülasyon + fitness ölçümü | Not birikmesi giderildi, flaky test düzeltildi | ✅ |
 | **B6** | Config | `data/config.json` runtime'da okunur | Env > config > varsayılan önceliği doğrulandı | ✅ |
 | **B7** | Dış problem | `--problem-file` + imzadan türeyen generic harness | Dış problemler (faktöriyel/palindrom) LLM ile değerlendirildi | ✅ |
+| **B5b** | Evrim kalitesi | `refine_prompt` taban prompt'u korur, `[ders]` kurallarını biriktirir | Prompt çökmesi (2343→89) bitti; birikim testi geçer | ✅ |
 
 ### B0 detayı (git geçmişi temizliği)
 - `target/` (1444 artifact, ~143 MB) yanlışlıkla repoya commit edilmişti;
@@ -119,6 +120,18 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 - Örnekler: `examples/problems/factorial.json`, `examples/problems/palindrome.json`.
 - Gerçek LLM (`qwen2.5-coder:1.5b`) ile doğrulandı: palindrom → 100.0 (4/4).
 - `evolve` artık her iterasyonda üretilen kodu ve ilk hata satırlarını yazdırır.
+
+### B5b detayı (evrim prompt kalitesi)
+- Kök neden: `refine_prompt` LLM'e **tüm sistem prompt'unu baştan yazdırıyordu**;
+  1.5b model iyi taban prompt'u bozuyordu. Ölçüldü: 2. iterasyonda prompt
+  **2343 → 89 karaktere** düştü (birikmiş kurallar silindi) ve evrim hiç yakınsamadı.
+- Çözüm: LLM artık **tek ve kısa bir kural** üretir; taban prompt aynen korunur,
+  kural `[ders] ...` satırı olarak eklenir. Yinelenen eklenmez, en fazla 8 ders
+  tutulur. Yeni test: `refine_prompt_preserves_base_and_accumulates_rules`.
+- Doğrulama: `evolve --problem-file factorial.json` → prompt artık 231 karakterde
+  **sabit** kalıyor (çökme yok). Ancak `qwen2.5-coder:1.5b` bu problemdeki
+  `u32→u64 product` tip hatasını hâlâ düzeltemiyor → **kalan darboğaz model
+  kapasitesi**, framework değil.
 
 ### B5 detayı (gerçek LLM popülasyon ölçümü)
 - Ölçüm (`qwen2.5-coder:1.5b`, `population evolve --generations 3 --size 4`):
