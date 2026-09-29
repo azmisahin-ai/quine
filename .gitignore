@@ -4,5 +4,6 @@ target/
 # Environment files
 .env
 .env.local
+
 # Quine runtime artifacts (arşiv, log, run kayıtları)
 data/
