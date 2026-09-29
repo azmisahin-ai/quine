@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (fmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  e2e-simulate:
+    name: E2E (LLM'siz simülasyon)
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI
+        run: cargo build --bin quine
+
+      - name: init
+        run: cargo run --bin quine -- init
+
+      - name: run-once (Faz 1)
+        run: cargo run --bin quine -- --simulate run-once --problem fib-001
+
+      - name: evolve (Faz 2)
+        run: cargo run --bin quine -- --simulate evolve --iterations 3 --problem fib-001
+
+      - name: population evolve (Faz 3)
+        run: cargo run --bin quine -- --simulate population evolve --generations 3 --size 4
+
+      - name: guardian check (Faz 4) — güvenli dosya geçmeli
+        run: |
+          printf 'pub fn ok() -> u32 { 42 }\n' > /tmp/ok.rs
+          cargo run --bin quine -- guard check /tmp/ok.rs
+
+      - name: guardian check (Faz 4) — tehlikeli dosya engellenmeli
+        run: |
+          printf 'pub fn evil() { unsafe { std::process::Command::new("rm").arg("-rf").arg("/").status(); } }\n' > /tmp/evil.rs
+          if cargo run --bin quine -- guard check /tmp/evil.rs; then
+            echo "::error::Guardian tehlikeli kodu engellemedi!"
+            exit 1
+          else
+            echo "✓ Guardian tehlikeli kodu engelledi (beklenen)."
+          fi
