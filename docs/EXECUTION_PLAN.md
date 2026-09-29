@@ -1,6 +1,6 @@
 # 📋 QUINE: YÜRÜTME PLANI (EXECUTION PLAN)
 
-> **Durum:** V1.1 — Doğrulama + Sertleştirme (B fazı tamam)
+> **Durum:** V1.2 — Doğrulama + Sertleştirme + Docker izolasyonu
 > **Başlangıç:** 2026-09-29
 > **Kapsam:** Bu dosya, `docs/MASTER_PLAN.md`'deki mimarinin **gerçekten
 > çalıştığını kanıtlamak** ve eksik operasyonel dosyaları tamamlamak için
@@ -63,6 +63,7 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 | **B1** | CI | GitHub Actions (`fmt`+`clippy`+`test`+E2E sim) | Workflow geçerli, adımlar yerelde geçer | ✅ |
 | **B2** | Sertleştirme | `extract_code` + regresyon testleri | 9 llm testi geçer, gerçek LLM 3/3 | ✅ |
 | **B3** | Test | `crates/quine-cli/tests/integration.rs` | 6 entegrasyon testi geçer | ✅ |
+| **B4** | Docker | `QUINE_SANDBOX=docker` uçtan uca | Simulate + gerçek LLM + guardian geçer | ✅ |
 
 ### B0 detayı (git geçmişi temizliği)
 - `target/` (1444 artifact, ~143 MB) yanlışlıkla repoya commit edilmişti;
@@ -78,6 +79,20 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
   → açıklama metninin koda karışıp derlemeyi bozması engellenir.
 - 5 yeni regresyon testi; gerçek LLM ile fib-001/sum-003/rev-002 → 100/100.
 - `quine-llm` test sayısı: 4 → 9.
+
+### B4 detayı (docker sandbox E2E)
+- `DockerSandbox` `docker run --rm -i --network none --memory 512m --cpus 1.0`
+  ile `rust:1-slim-bookworm` imajında derleyip çalıştırır; ağ ve kaynak izole.
+- Doğrulanan senaryolar (hepsi `QUINE_SANDBOX=docker`):
+  - `--simulate run-once --problem fib-001` → 100.0 (4/4), ~0.5s.
+  - `--simulate evolve` + `population evolve` → arşive yazıldı.
+  - gerçek LLM (`qwen2.5-coder:1.5b`) `run-once` → 100.0 (4/4).
+  - `guard check evil.rs` → `SecurityViolation` (sandbox'a hiç ulaşmadan).
+- Yeni opt-in test: `docker_sandbox_evaluates_in_isolation`
+  (`#[ignore]`; `QUINE_TEST_DOCKER=1` ile çalışır) → yerelde geçti.
+- CI'a `e2e-docker` job'u eklendi (`needs: quality`).
+- Not: Ortamda `openhands` kullanıcısı `docker` grubuna eklendi
+  (`usermod -aG docker`); CI'da runner zaten docker erişimli.
 
 
 ### A6 detayı
@@ -109,7 +124,7 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 |------|----------|-------|
 | Küçük model kod karıştırması | 1.5B model bazen kod bloğu dışına metin koyar | ✅ B2'de `extract_code` sertleştirildi; hâlâ daha büyük model (`7b`) daha iyi olur |
 | `extract_code` dayanıklılığı | Kod bloğu yoksa ham içeriği döndürür | ✅ B2: think-block temizliği + `rust` fence tercihi + fence'siz fonksiyon ayıklama |
-| Docker sandbox | Varsayılan `local`; `docker` modu gerçek CI'da test edilmeli | `QUINE_SANDBOX=docker` ile E2E koş (açık) |
+| Docker sandbox | Varsayılan `local`; `docker` modu izole çalışmalı | ✅ B4: `QUINE_SANDBOX=docker` ile E2E + CI job doğrulandı |
 | Think-block temizliği | Bazı modeller `thinking` etiketi basar | ✅ B2: `extract_code` içinde temizleniyor |
 
 ---
@@ -119,7 +134,7 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 - [x] `cargo test --test integration` entegrasyon test dosyası ekle. (B3)
 - [x] `extract_code`'u muhafazakâr hale getir + regresyon testi. (B2)
 - [x] CI (GitHub Actions): `fmt`, `clippy`, `test`, `--simulate` E2E. (B1)
-- [ ] `QUINE_SANDBOX=docker` ile uçtan uca değerlendirme testi.
+- [x] `QUINE_SANDBOX=docker` ile uçtan uca değerlendirme testi. (B4)
 - [ ] Çok-ajanlı gerçek LLM senaryosu (`population evolve`) + fitness artışı ölçümü.
 - [ ] Daha büyük model (`qwen2.5-coder:7b`) ile karşılaştırmalı benchmark.
 
@@ -135,6 +150,6 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 | `quine-eval` | 6 | ✅ |
 | `quine-evolution` | 6 | ✅ |
 | `quine-bench-simple` | 8 | ✅ |
-| `integration` (quine-cli) | 6 | ✅ |
+| `integration` (quine-cli) | 6 (+1 docker opt-in) | ✅ |
 | **Toplam** | **44** | ✅ |
 

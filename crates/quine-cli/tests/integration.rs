@@ -158,3 +158,33 @@ fn population_manager_selects_and_breeds() {
     // Çocuklar sonraki jenerasyona ait olmalı.
     assert!(next.iter().any(|a| a.generation == 1));
 }
+
+/// Docker sandbox izolasyon testi (opt-in).
+///
+/// Varsayılan olarak atlanır; CI'da çalıştırmak için:
+/// `QUINE_TEST_DOCKER=1 cargo test -p quine-cli --test integration -- --ignored`
+/// Docker yoksa sessizce geçer (geliştirici ortamını kırmaz).
+#[tokio::test]
+#[ignore = "docker gerektirir; QUINE_TEST_DOCKER=1 ile çalıştır"]
+async fn docker_sandbox_evaluates_in_isolation() {
+    if std::env::var("QUINE_TEST_DOCKER").as_deref() != Ok("1") {
+        eprintln!("QUINE_TEST_DOCKER=1 değil — atlanıyor");
+        return;
+    }
+    if !quine_eval::DockerSandbox::available() {
+        eprintln!("docker yok — atlanıyor");
+        return;
+    }
+
+    let problem = quine_bench_simple::SimpleBenchmark::problem("fib-001").expect("problem");
+    let ev = Evaluator::new(Box::new(quine_eval::DockerSandbox::default()));
+    let code = EchoBackend::fibonacci_solver()
+        .generate(&LlmRequest::new("echo", "sys", problem.to_llm_prompt()))
+        .await
+        .expect("generate")
+        .extract_code();
+
+    let result = ev.evaluate(uuid::Uuid::new_v4(), &problem, &code).await;
+    assert!(result.success, "stderr: {}", result.stderr);
+    assert_eq!(result.score, 100.0);
+}
