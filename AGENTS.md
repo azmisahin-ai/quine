@@ -76,12 +76,31 @@ Yeni problem eklerken `quine-bench-simple` içinde hem çözücü stub'ı hem
 ## Bilinen Tuzaklar
 
 - Küçük modeller (`1.5b`) bazen kod bloğu dışına açıklama/örnek satırı koyar;
-  `quine-llm::LlmResponse::extract_code` yalnızca ```` ``` ```` fence'leri
-  ayıklar. Deterministik çözüm için daha büyük model veya `evolve` döngüsü kullan.
-- `data/` dizini `.gitignore`'da değildir içerik üretir; commit etme.
-- Docker sandbox varsayılan değildir (`local`); CI'da `QUINE_SANDBOX=docker` dene.
+  `quine-llm::LlmResponse::extract_code` ` thinking`/`<thinking>` bloklarını
+  temizler, ```` ```rust ```` fence'lerini tercih eder, yoksa ham metinden ilk
+  fonksiyon gövdesini (süslü parantez dengesi) ayıklar.
+- `data/` dizini `.gitignore`'dadır; içerik üretir, commit etme.
+- Docker sandbox varsayılan değildir (`local`); `QUINE_SANDBOX=docker` ile seç.
+  Docker grubu yoksa `LocalProcessSandbox`'a düşer (uyarı basar).
+- **Evrim mutasyonu:** `next_generation` `[keşif notu gN]` satırlarını
+  `mutate_prompt_with_hint` ile temizler — yeni satır eklemek yerine değiştir,
+  aksi halde genom jenerasyonlar boyunca şişer. Fitness 100.0 olan ebeveynin
+  prompt'u mutasyona uğratılmaz (elit bozulmasını önler).
+- **LLM non-determinizmi:** `temperature` varsayılanı `0.2`; ölçüm/benchmark
+  tekrarlanabilirliği için `QUINE_TEMPERATURE=0.0` ver.
+
+## Ortam Değişkenleri
+
+| Değişken | Varsayılan | Açıklama |
+|----------|-----------|----------|
+| `QUINE_MODEL` | `qwen2.5-coder:1.5b` | Ollama modeli |
+| `QUINE_SANDBOX` | `local` | `local` veya `docker` |
+| `QUINE_TEMPERATURE` | `0.2` | Sampling; `0.0` = deterministik |
+| `QUINE_TEST_DOCKER` | (yok) | `1` → docker entegrasyon testi çalışır |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama adresi |
 
 ## Devam Eden / Sonraki İşler
 
-`docs/EXECUTION_PLAN.md` → "Sonraki Faz" bölümüne bak (integration test,
-`extract_code` sertleştirme, CI workflow).
+`docs/EXECUTION_PLAN.md` → "Sonraki Faz" bölümüne bak. B0–B5 tamamlandı
+(git temizliği, CI, `extract_code`, entegrasyon testleri, docker E2E, evrim
+ölçümü). Açık: daha büyük model (`7b`) ile karşılaştırmalı benchmark.
