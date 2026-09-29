@@ -1,0 +1,18 @@
+[package]
+name = "quine-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Quine: LLM backend abstraction (Ollama, vLLM) — local-first"
+
+[dependencies]
+quine-common.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
