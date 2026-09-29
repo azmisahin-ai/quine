@@ -65,6 +65,8 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 | **B3** | Test | `crates/quine-cli/tests/integration.rs` | 6 entegrasyon testi geçer | ✅ |
 | **B4** | Docker | `QUINE_SANDBOX=docker` uçtan uca | Simulate + gerçek LLM + guardian geçer | ✅ |
 | **B5** | Evrim | Gerçek LLM çok-ajanlı popülasyon + fitness ölçümü | Not birikmesi giderildi, flaky test düzeltildi | ✅ |
+| **B6** | Config | `data/config.json` runtime'da okunur | Env > config > varsayılan önceliği doğrulandı | ✅ |
+| **B7** | Dış problem | `--problem-file` + imzadan türeyen generic harness | Dış problemler (faktöriyel/palindrom) LLM ile değerlendirildi | ✅ |
 
 ### B0 detayı (git geçmişi temizliği)
 - `target/` (1444 artifact, ~143 MB) yanlışlıkla repoya commit edilmişti;
@@ -95,6 +97,28 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 - Not: Ortamda `openhands` kullanıcısı `docker` grubuna eklendi
   (`usermod -aG docker`); CI'da runner zaten docker erişimli.
 
+
+### B6 detayı (config.json runtime kullanımı)
+- Önceden `init` `data/config.json` yazıyordu ama runtime yalnızca ortam
+  değişkenlerine bakıyordu → dosyadaki `sandbox`/`model` alanları etkisizdi.
+- Yeni `load_config` + `resolved_host/model/sandbox`: **env > config > varsayılan**.
+- Bozuk/yok dosya sessizce varsayılana düşer (`tracing::warn`).
+- Doğrulandı: config'te `sandbox: docker` → docker denenir, yoksa local'e düşer;
+  `QUINE_SANDBOX=local` ile env override çalışır.
+
+### B7 detayı (dış problem desteği)
+- Sorun: test harness'i `match problem.id` ile 3 probleme **sabit kodluydu**;
+  beklenen çıktılar da `bench::expected_outputs(id)` ile gömülü sete bağlıydı.
+- Çözüm: harness artık `function_signature` stub'ından türetilir
+  (`parse_signature` + `arg_expr`/`out_expr`); beklenen çıktılar `test_cases`'ten.
+- Harness düz `rustc` ile derlendiği için JSON çözümleme **std-only**'dir
+  (serde_json yok) — desteklenen tipler: i8..i64/u8..u64/usize/isize, f32/f64,
+  bool, String/&str, Vec<i64>/&[i64]. Desteklenmeyen tip → net hata.
+- CLI: `run-once`/`evolve` artık `--problem-file <json>` kabul eder; verilirse
+  `--problem` yok sayılır ve tanım doğrulanır (id/imza/test zorunlu).
+- Örnekler: `examples/problems/factorial.json`, `examples/problems/palindrome.json`.
+- Gerçek LLM (`qwen2.5-coder:1.5b`) ile doğrulandı: palindrom → 100.0 (4/4).
+- `evolve` artık her iterasyonda üretilen kodu ve ilk hata satırlarını yazdırır.
 
 ### B5 detayı (gerçek LLM popülasyon ölçümü)
 - Ölçüm (`qwen2.5-coder:1.5b`, `population evolve --generations 3 --size 4`):

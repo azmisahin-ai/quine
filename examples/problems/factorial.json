@@ -1,0 +1,12 @@
+{
+  "id": "ext-factorial",
+  "title": "Faktöriyel",
+  "description": "n! değerini döndüren `factorial` fonksiyonunu yaz. 0! = 1. Taşma olmaması için u64 döndür.",
+  "function_signature": "pub fn factorial(n: u32) -> u64 { todo!() }",
+  "test_cases": [
+    { "input": 0, "expected": 1 },
+    { "input": 1, "expected": 1 },
+    { "input": 5, "expected": 120 },
+    { "input": 10, "expected": 3628800 }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "id": "ext-palindrome",
+  "title": "Palindrom Kontrolü",
+  "description": "Verilen string palindrom ise true döndüren `is_palindrome` fonksiyonunu yaz. Büyük/küçük harf duyarsız ol (girdiler zaten küçük harfli gelecek).",
+  "function_signature": "pub fn is_palindrome(s: &str) -> bool { todo!() }",
+  "test_cases": [
+    { "input": "kayak", "expected": true },
+    { "input": "quine", "expected": false },
+    { "input": "eyedipadanadapideye", "expected": true },
+    { "input": "", "expected": true }
+  ]
+}

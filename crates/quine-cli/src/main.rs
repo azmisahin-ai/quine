@@ -48,9 +48,12 @@ enum Commands {
     },
     /// Tek bir problemi uçtan uca çözer: LLM → kod → sandbox → puan (Faz 1)
     RunOnce {
-        /// Problem id'si (fib-001 | rev-002 | sum-003)
+        /// Yerleşik problem id'si (fib-001 | rev-002 | sum-003)
         #[arg(long, default_value = "fib-001")]
         problem: String,
+        /// Dışarıdan problem tanımı (JSON). Verilirse `--problem` yok sayılır.
+        #[arg(long, value_name = "FILE")]
+        problem_file: Option<PathBuf>,
     },
     /// Öz-değişiklik döngüsü: başarısızsa prompt'u güncelle, tekrar dene (Faz 2)
     Evolve {
@@ -58,6 +61,9 @@ enum Commands {
         iterations: u32,
         #[arg(long, default_value = "fib-001")]
         problem: String,
+        /// Dışarıdan problem tanımı (JSON). Verilirse `--problem` yok sayılır.
+        #[arg(long, value_name = "FILE")]
+        problem_file: Option<PathBuf>,
     },
     /// Popülasyon komutları (Faz 3)
     #[command(subcommand)]
@@ -96,7 +102,11 @@ fn backend_from_flags(simulate: bool) -> Arc<DynBackend> {
     if simulate {
         Arc::new(quine_llm::EchoBackend::fibonacci_solver())
     } else {
-        Arc::new(OllamaBackend::from_env())
+        let cfg = load_config();
+        Arc::new(OllamaBackend::new(
+            resolved_host(&cfg),
+            resolved_model(&cfg),
+        ))
     }
 }
 
@@ -106,14 +116,57 @@ fn model_name(simulate: bool) -> String {
     if simulate {
         "simulate".into()
     } else {
-        OllamaBackend::from_env().model().to_string()
+        resolved_model(&load_config())
     }
 }
 
 fn build_evaluator() -> Arc<Evaluator> {
-    let sandbox = quine_eval::sandbox_from_env();
+    let cfg = load_config();
+    let sandbox = quine_eval::sandbox_from_kind(&resolved_sandbox(&cfg));
     tracing::info!("sandbox: {}", sandbox.kind());
     Arc::new(Evaluator::new(sandbox).with_audit(AuditLog::new(data_path("audit.log"))))
+}
+
+/// `data/config.json` içeriği (tüm alanlar isteğe bağlı).
+#[derive(Debug, Default, serde::Deserialize)]
+struct FileConfig {
+    ollama_host: Option<String>,
+    model: Option<String>,
+    sandbox: Option<String>,
+}
+
+/// `data/config.json`'ı okur; dosya yoksa/bozuksa varsayılanlara düşer.
+fn load_config() -> FileConfig {
+    let path = data_path("config.json");
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
+            tracing::warn!("config.json geçersiz ({e}); varsayılanlar kullanılıyor");
+            FileConfig::default()
+        }),
+        Err(_) => FileConfig::default(),
+    }
+}
+
+/// Öncelik sırası: ortam değişkeni > config.json > yerleşik varsayılan.
+fn resolved_host(cfg: &FileConfig) -> String {
+    std::env::var("OLLAMA_HOST")
+        .ok()
+        .or_else(|| cfg.ollama_host.clone())
+        .unwrap_or_else(|| quine_llm::DEFAULT_OLLAMA_HOST.into())
+}
+
+fn resolved_model(cfg: &FileConfig) -> String {
+    std::env::var("QUINE_MODEL")
+        .ok()
+        .or_else(|| cfg.model.clone())
+        .unwrap_or_else(|| quine_llm::DEFAULT_MODEL.into())
+}
+
+fn resolved_sandbox(cfg: &FileConfig) -> String {
+    std::env::var("QUINE_SANDBOX")
+        .ok()
+        .or_else(|| cfg.sandbox.clone())
+        .unwrap_or_else(|| "local".into())
 }
 
 fn data_path(name: &str) -> PathBuf {
@@ -124,6 +177,43 @@ fn select_problem(id: &str) -> Result<quine_common::Problem> {
     quine_bench_simple::SimpleBenchmark::problem(id).with_context(|| {
         format!("bilinmeyen problem '{id}'. Geçerliler: fib-001, rev-002, sum-003")
     })
+}
+
+/// Problem tanımını yerleşik setten veya dış JSON dosyasından yükler.
+///
+/// `--problem-file` verilirse dosya okunur ve `--problem` yok sayılır; aksi
+/// halde yerleşik id kullanılır.
+fn load_problem(id: &str, file: Option<&std::path::Path>) -> Result<quine_common::Problem> {
+    match file {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("problem dosyası okunamadı: {}", path.display()))?;
+            let problem: quine_common::Problem = serde_json::from_str(&raw)
+                .with_context(|| format!("problem dosyası geçersiz JSON: {}", path.display()))?;
+            validate_problem(&problem)?;
+            println!(
+                "📥 Dış problem yüklendi: {} ({})",
+                problem.id,
+                path.display()
+            );
+            Ok(problem)
+        }
+        None => select_problem(id),
+    }
+}
+
+/// Dış problem tanımının değerlendirilebilir olduğunu doğrular.
+fn validate_problem(p: &quine_common::Problem) -> Result<()> {
+    if p.id.trim().is_empty() {
+        anyhow::bail!("problem 'id' boş olamaz");
+    }
+    if p.function_signature.trim().is_empty() {
+        anyhow::bail!("problem 'function_signature' boş olamaz");
+    }
+    if p.test_cases.is_empty() {
+        anyhow::bail!("problem 'test_cases' en az bir girdi içermeli");
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -141,11 +231,15 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Init => cmd_init(),
         Commands::TestLlm { prompt } => cmd_test_llm(cli.simulate, prompt).await,
-        Commands::RunOnce { problem } => cmd_run_once(cli.simulate, &problem).await,
+        Commands::RunOnce {
+            problem,
+            problem_file,
+        } => cmd_run_once(cli.simulate, &problem, problem_file.as_deref()).await,
         Commands::Evolve {
             iterations,
             problem,
-        } => cmd_evolve(cli.simulate, iterations, &problem).await,
+            problem_file,
+        } => cmd_evolve(cli.simulate, iterations, &problem, problem_file.as_deref()).await,
         Commands::Population(PopulationCommands::Evolve { generations, size }) => {
             cmd_population_evolve(cli.simulate, generations, size).await
         }
@@ -204,8 +298,12 @@ async fn cmd_test_llm(simulate: bool, prompt: String) -> Result<()> {
 // Faz 1
 // ---------------------------------------------------------------------------
 
-async fn cmd_run_once(simulate: bool, problem_id: &str) -> Result<()> {
-    let problem = select_problem(problem_id)?;
+async fn cmd_run_once(
+    simulate: bool,
+    problem_id: &str,
+    problem_file: Option<&std::path::Path>,
+) -> Result<()> {
+    let problem = load_problem(problem_id, problem_file)?;
     let backend = backend_from_flags(simulate);
     let model = model_name(simulate);
     let evaluator = build_evaluator();
@@ -256,8 +354,13 @@ async fn cmd_run_once(simulate: bool, problem_id: &str) -> Result<()> {
 // Faz 2
 // ---------------------------------------------------------------------------
 
-async fn cmd_evolve(simulate: bool, iterations: u32, problem_id: &str) -> Result<()> {
-    let problem = select_problem(problem_id)?;
+async fn cmd_evolve(
+    simulate: bool,
+    iterations: u32,
+    problem_id: &str,
+    problem_file: Option<&std::path::Path>,
+) -> Result<()> {
+    let problem = load_problem(problem_id, problem_file)?;
     let backend = backend_from_flags(simulate);
     let model = model_name(simulate);
     let evaluator = build_evaluator();
@@ -279,10 +382,15 @@ async fn cmd_evolve(simulate: bool, iterations: u32, problem_id: &str) -> Result
         let code = resp.extract_code();
         let result = evaluator.evaluate(agent.id, &problem, &code).await;
         agent.fitness_score = result.score;
+        println!("  🧾 Üretilen kod:\n{}", indent(&code));
         println!(
             "  → success={} score={:.1} ({}/{})",
             result.success, result.score, result.tests_passed, result.tests_total
         );
+        if !result.success && !result.stderr.trim().is_empty() {
+            let err = result.stderr.lines().take(4).collect::<Vec<_>>().join("\n");
+            println!("  ⚠️ hata: {err}");
+        }
 
         if result.success {
             println!("✅ Problem çözüldü! Prompt güncellemeye gerek yok.");
