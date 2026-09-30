@@ -378,15 +378,28 @@ async fn start_run(
     // Sandbox: fail-closed (geçersiz tür reddedilir; docker yoksa hata).
     // Demo modunda docker gerekmemesi kullanıcı için kritik bir kolaylıktır.
     let simulate = body.simulate.unwrap_or(app.simulate);
-    let mut sandbox_kind = body
+    let sandbox_kind = body
         .sandbox
         .clone()
         .unwrap_or_else(|| app.defaults.sandbox_kind.clone());
-    if simulate && body.sandbox.is_none() {
-        sandbox_kind = "local".into();
-    }
-    let resolved = quine_eval::sandbox_from_kind(&sandbox_kind)
-        .map_err(|e| bad_request(format!("sandbox: {e}")))?;
+    // Demo, "hiçbir şey kurmadan çalışır" sözünü tutmalı: panel `docker` seçili
+    // gelse bile Docker yoksa çalışma fail-closed olarak düşerdi. Demo
+    // deterministik ve izolasyon gerektirmediği için `local`'e sabitlenir —
+    // ama istenen tür yine de doğrulanır (bilinmeyen değer sessizce kabul edilmez).
+    let resolved = if simulate {
+        match sandbox_kind.trim() {
+            "docker" | "local" => quine_eval::sandbox_from_kind("local")
+                .map_err(|e| bad_request(format!("sandbox: {e}")))?,
+            other => {
+                return Err(bad_request(format!(
+                    "geçersiz sandbox türü: '{other}'. Geçerli değerler: 'docker' veya 'local'"
+                )))
+            }
+        }
+    } else {
+        quine_eval::sandbox_from_kind(&sandbox_kind)
+            .map_err(|e| bad_request(format!("sandbox: {e}")))?
+    };
     let sandbox_kind = resolved.kind().to_string();
 
     let mode = match body.mode.as_deref() {
@@ -705,6 +718,56 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body={body}");
         }
+    }
+
+    #[tokio::test]
+    async fn demo_ignores_docker_sandbox_request() {
+        // Panel `docker` seçili gönderir (varsayılanı budur); demo modunda Docker
+        // kurulu olmasa bile çalışma başlamalı ve `local` sandbox'a düşmeli.
+        let st = state();
+        let store = st.ctx.store.clone();
+        let app = router(st);
+        let body = serde_json::json!({
+            "problem_id": "fib-001",
+            "mode": "evolve",
+            "sandbox": "docker",
+            "simulate": true
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/runs")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let id = body_json(resp).await["run_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        for _ in 0..400 {
+            if let Ok(Some(r)) = store.get_run(&id) {
+                if r.status.is_terminal() {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let r = store.get_run(&id).unwrap().unwrap();
+        assert_eq!(
+            r.sandbox, "local",
+            "demo her zaman local sandbox kullanmalı"
+        );
+        assert!(
+            r.production_success,
+            "demo başarıyla bitmeli: {:?}",
+            r.status
+        );
     }
 
     #[tokio::test]

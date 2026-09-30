@@ -96,7 +96,7 @@ izleyin:
 cargo run --bin quine -- serve --demo
 ```
 
-Bu komut tarayıcıda `http://127.0.0.1:8099` adresini açar. Panelde:
+Bu komut tarayıcıda `http://127.0.0.1:8080` adresini açar. Panelde:
 
 * **Çalıştır** düğmesiyle bir ajan başlatın; adımları (LLM isteği → kod →
   guardian → sandbox → test → puan) **canlı** olarak zaman çizelgesinde görün.
@@ -134,7 +134,7 @@ Windows'ta da çalışır (`cargo run --bin quine -- serve --demo`). İki nokta:
 * **`local` sandbox `rustc` ister.** Üretilen kod `rustc` ile derlenir; Rust
   kuruluysa sorun yok. Gerçek çalıştırmalar için **Docker Desktop + `docker`
   sandbox önerilir** (izole, ağ kapalı).
-* **Panel adresi** `http://127.0.0.1:8099` — tarayıcı otomatik açılmazsa bu
+* **Panel adresi** `http://127.0.0.1:8080` — tarayıcı otomatik açılmazsa bu
   adresi elle açın.
 
 ---
