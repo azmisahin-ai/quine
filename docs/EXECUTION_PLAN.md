@@ -199,14 +199,14 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 
 | Katman | Test sayısı | Durum |
 |--------|:-----------:|:-----:|
-| `quine-common` | 4 | ✅ |
+| `quine-common` | 7 | ✅ |
 | `quine-llm` | 10 | ✅ |
-| `quine-guardian` | 6 | ✅ |
-| `quine-eval` | 12 | ✅ |
-| `quine-evolution` | 9 | ✅ |
-| `quine-bench-simple` | 8 | ✅ |
-| `integration` (quine-cli) | 6 (+1 docker opt-in) | ✅ |
-| **Toplam** | **58** | ✅ |
+| `quine-guardian` | 8 | ✅ |
+| `quine-eval` | 14 | ✅ |
+| `quine-evolution` | 13 | ✅ |
+| `quine-bench-simple` | 6 | ✅ |
+| `integration` (quine-cli) | 7 (+1 docker opt-in) | ✅ |
+| **Toplam** | **65** | ✅ |
 
 ---
 
@@ -235,6 +235,18 @@ model kapasitesi. `7b` dış problemleri ilk iterasyonda çözüyor.
 4. **Çok argümanlı fonksiyonlar hiç çalışmıyordu** — harness tek girdi
    satırını tek değer sanıyordu (`gcd(a, b)` panikliyordu). Harness artık
    test girdilerini tipli Rust literal'leri olarak üretiyor.
+5. **Docker erişilemezse sessizce yerel sandbox'a düşülüyordu** — `sandbox=docker`
+   istendiği halde LLM kodu ana sistemde çalışıyordu (çekirdek ilke ihlali).
+   `sandbox_from_kind` artık `Result` döner ve **hata verir**; yerel mod yalnızca
+   açıkça `QUINE_SANDBOX=local` ile seçilir ve kullanıcı uyarılır.
+6. **Öğrenilen kural kod satırı olabiliyordu** — model kural yerine kod döndürünce
+   `[ders] fn factorial(n: u32) -> u64 {` prompt'a giriyordu. `extract_rule` artık
+   yalnızca düz yazı kuralı kabul eder (kod/fence/tek-kelime reddedilir, uzun
+   paragraf cümle sınırında kesilir).
+7. **Heuristik kural her jenerasyonda tekrar ekleniyordu** — `[ders]` yönetimi iki
+   ayrı yerde olduğu için prompt şişiyordu. Ortak `apply_rule` ile tekrar engellendi.
+8. **Docker sandbox'ta PID limiti yoktu** — fork-bomb ana makinenin PID'lerini
+   tüketebilirdi. `--pids-limit 256` + `--security-opt no-new-privileges` eklendi.
 
 ## 🟣 Faz 4 Tamamlandı — CodeMutation + Guardian
 
@@ -242,7 +254,8 @@ model kapasitesi. `7b` dış problemleri ilk iterasyonda çözüyor.
   `process::Command`, `rm -rf`, ağ ve env desenlerini tarar; kritik ihlal →
   `SecurityViolation`.
 - **Adım 4.2** `DockerSandbox`: `--network none`, `--memory`/`--cpus` limiti,
-  `:ro` mount, `timeout` ile izolasyon.
+  `--pids-limit`, `--security-opt no-new-privileges`, `:ro` mount, `timeout`
+  ile izolasyon. Docker erişilemezse **hata verir** (sessiz yerel fallback yok).
 - **Adım 4.3 (yeni)** `quine-evolution::CodeMutator`: LLM'in önerdiği tam dosya
   içeriğini önce guardian'dan geçirir; temizse yedeği alıp **atomik** yazar,
   kritik ihlalde **hiç yazmaz**. CLI: `quine mutate <dosya> --instruction "..."
@@ -250,3 +263,30 @@ model kapasitesi. `7b` dış problemleri ilk iterasyonda çözüyor.
 - **Kabul kriteri:** `rm -rf /` içeren üretim `guard check` ve `mutate`
   yollarında engelleniyor; `data/audit.log`'a `blocked` kaydı düşüyor.
   Uçtan uca test: `integration::code_mutation_is_applied_and_guarded`.
+
+---
+
+## 🏁 Gerçek Kullanım Hazırlığı (dürüst değerlendirme)
+
+**Hazır olanlar**
+- 5 fazın tümü kod olarak mevcut; 65 test + clippy temiz, CI'da 4 iş akışı.
+- Faz 1/2/3/4 uçtan uca **gerçek LLM + Docker** ile doğrulandı.
+- Güvenlik: `--network none`, RAM/CPU/PID limiti, `:ro` mount, 60s timeout,
+  guardian (kritik ihlalde yazmaz), audit log, docker yoksa fail-closed.
+
+**Bilinen sınırlar (dürüstçe)**
+1. **Tek LLM çağrısı ile çözüm** — `evolve_step` her iterasyonda sıfırdan kod
+   üretir; öğrenilen `[ders]` kuralları yardımcı olur ama modelin kendi hatasını
+   *görüp* düzeltmesi (derleyici çıktısını geri besleme) yok. Bu, 1.5b gibi
+   küçük modellerde yakınsamayı sınırlar.
+2. **Fitness = test skoru** — kısmi ilerleme (örn. 7/8) teşvik edilir ama
+   mutasyonun gerçekten nedensel katkısı ölçülmez.
+3. **Harness tip desteği** — `&str`, `String`, `bool`, tamsayı/float, `Vec<i64>`
+   destekli; başka tipler için harness genişletmesi gerekir.
+4. **Çok-ajanlı popülasyon** — arşiv ve nesil ilerlemesi çalışıyor; ancak
+   eşzamanlı değerlendirme sabit problem seti üzerinde.
+
+**Sonuç:** Quine, **araştırma/deneysel kullanım** için çalışır durumda: Ollama
+ile yerel LLM bağlanır, kod üretir, sandbox'ta doğrular, guardian ile korur ve
+prompt evrimini arşivler. **Üretim/otonom** kullanım için önce (1) derleyici
+çıktısını geri besleyen döngü ve (2) nedensel fitness ölçümü eklenmelidir.

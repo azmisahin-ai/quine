@@ -81,7 +81,14 @@ Yeni problem eklerken `quine-bench-simple` içinde hem çözücü stub'ı hem
   fonksiyon gövdesini (süslü parantez dengesi) ayıklar.
 - `data/` dizini `.gitignore`'dadır; içerik üretir, commit etme.
 - Docker sandbox varsayılan değildir (`local`); `QUINE_SANDBOX=docker` ile seç.
-  Docker grubu yoksa `LocalProcessSandbox`'a düşer (uyarı basar).
+  `docker` seçiliyken Docker erişilemezse çalışma **durur** (sessizce
+  `LocalProcessSandbox`'a düşmez — çekirdek ilke #5). `local` seçilirse uyarı basar.
+  Sandbox: `--network none`, `--memory 512m`, `--cpus 1.0`, `--pids-limit 256`,
+  `--security-opt no-new-privileges`, `:ro` mount, 60s `timeout`.
+- **Öğrenilen kurallar (`[ders]`):** `MutationEngine::extract_rule` yalnızca düz
+  yazı kuralı kabul eder (kod/fence/tek-kelime reddedilir, uzun paragraf cümle
+  sınırında kesilir). Tüm kural ekleme yolları ortak `apply_rule`'dan geçer
+  (tekrar yok, en fazla 8 kural).
 - **Evrim mutasyonu:** `next_generation` `[keşif notu gN]` satırlarını
   `mutate_prompt_with_hint` ile temizler — yeni satır eklemek yerine değiştir,
   aksi halde genom jenerasyonlar boyunca şişer. Fitness 100.0 olan ebeveynin
