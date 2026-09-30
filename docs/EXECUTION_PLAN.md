@@ -191,7 +191,7 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 - [x] CI (GitHub Actions): `fmt`, `clippy`, `test`, `--simulate` E2E. (B1)
 - [x] `QUINE_SANDBOX=docker` ile uçtan uca değerlendirme testi. (B4)
 - [x] Çok-ajanlı gerçek LLM senaryosu (`population evolve`) + fitness ölçümü. (B5)
-- [ ] Daha büyük model (`qwen2.5-coder:7b`) ile karşılaştırmalı benchmark.
+- [x] Daha büyük model (`qwen2.5-coder:7b`) ile karşılaştırmalı benchmark.
 
 ---
 
@@ -202,9 +202,36 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 | `quine-common` | 4 | ✅ |
 | `quine-llm` | 10 | ✅ |
 | `quine-guardian` | 6 | ✅ |
-| `quine-eval` | 6 | ✅ |
-| `quine-evolution` | 7 | ✅ |
+| `quine-eval` | 12 | ✅ |
+| `quine-evolution` | 9 | ✅ |
 | `quine-bench-simple` | 8 | ✅ |
 | `integration` (quine-cli) | 6 (+1 docker opt-in) | ✅ |
-| **Toplam** | **47** | ✅ |
+| **Toplam** | **58** | ✅ |
 
+---
+
+## 🔬 Model Karşılaştırması (7b vs 1.5b)
+
+Aynı problem seti, `QUINE_TEMPERATURE=0.0`, 3 tekrar (`scripts/bench-compare.sh`):
+
+| Model | fib-001 | rev-002 | sum-003 | faktöriyel (dış) |
+|-------|:-------:|:-------:|:-------:|:----------------:|
+| `qwen2.5-coder:1.5b` | 3/3 | 3/3 | 3/3 | **0/3** |
+| `qwen2.5-coder:7b`   | 3/3 | 3/3 | 3/3 | **3/3** |
+
+**Sonuç:** Kolay problemlerde iki model eşit; karmaşık problemde darboğaz
+model kapasitesi. `7b` dış problemleri ilk iterasyonda çözüyor.
+
+## 🐞 Bulunan ve Düzeltilen Hatalar (sertleştirme)
+
+1. **Evrimde elitizm yoktu** — daha kötü prompt kabul ediliyor, fitness
+   iterasyonlar arası sıfırlanıyordu (rastgele yürüyüş). `evolve_step` ile
+   elitist tepe-tırmanma eklendi (yalnızca fitness düşmezse mutasyon kabul).
+2. **`stderr` boş mantık hatalarında LLM kör kalıyordu** — hangi testin neden
+   başarısız olduğu bildirilmiyordu. `evaluate` artık `girdi X: beklenen A,
+   alınan B` teşhisi üretiyor.
+3. **Kural çıkarımı ` ```rust ` fence etiketini kural sanıyordu** —
+   `first_meaningful_line` dil etiketlerini atlıyor.
+4. **Çok argümanlı fonksiyonlar hiç çalışmıyordu** — harness tek girdi
+   satırını tek değer sanıyordu (`gcd(a, b)` panikliyordu). Harness artık
+   test girdilerini tipli Rust literal'leri olarak üretiyor.

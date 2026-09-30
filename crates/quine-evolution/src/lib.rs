@@ -56,11 +56,7 @@ impl<'a, B: LlmBackend + ?Sized> MutationEngine<'a, B> {
             .generate(&request)
             .await
             .context("mutasyon LLM isteği")?;
-        let rule = strip_markdown(resp.content.trim())
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim()
+        let rule = first_meaningful_line(&resp.content)
             .chars()
             .take(200)
             .collect::<String>();
@@ -130,11 +126,29 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn strip_markdown(s: &str) -> String {
-    s.trim()
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim()
+/// Yanıttan anlamlı ilk satırı çıkarır.
+///
+/// Model genellikle kuralı ```` ```rust ... ``` ```` fence'ine sarar; yalnızca
+/// fence işaretlerini soymak `rust` gibi dil etiketini kural sanmaya yol açar.
+/// Bu yüzden fence satırları ve tek başına duran dil etiketleri atlanır.
+fn first_meaningful_line(raw: &str) -> String {
+    const LANG_TAGS: [&str; 8] = [
+        "rust",
+        "text",
+        "md",
+        "markdown",
+        "bash",
+        "sh",
+        "plaintext",
+        "json",
+    ];
+    raw.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.trim_start_matches('#').trim())
+        .map(|l| l.trim_matches('`').trim())
+        .find(|l| !l.is_empty() && !LANG_TAGS.contains(&l.to_ascii_lowercase().as_str()))
+        .unwrap_or("")
         .to_string()
 }
 
@@ -356,6 +370,80 @@ pub async fn evaluate_agent<B: LlmBackend + ?Sized>(
     Ok((agent, result))
 }
 
+/// Tek ajanlı evrim turunun sonucu.
+#[derive(Debug, Clone)]
+pub struct EvolveStep {
+    /// Bir sonraki turda kullanılacak ajan (mutasyon kabul edildiyse çocuk,
+    /// aksi halde girdi ajanının aynısı).
+    pub agent: Agent,
+    /// Bu turda **girdi ajanının** değerlendirme sonucu.
+    pub result: EvaluationResult,
+    /// Mutasyonun kabul edilip edilmediği (elitizm kapısı).
+    pub accepted: bool,
+    /// LLM'in ürettiği (değerlendirilen) kod — teşhis için.
+    pub code: String,
+}
+
+/// Tek ajanlı **elitist tepe-tırmanma** turu (Adım 2.2).
+///
+/// Girdi ajanının prompt'uyla kod üretir ve değerlendirir; başarısızsa
+/// [`MutationEngine::refine_prompt`] ile tek bir kısa ders ekleyip mutasyon
+/// üretir. Mutasyon **yalnızca mevcut fitness düşmezse** kabul edilir; aksi
+/// halde girdi ajanı (ve fitness'ı) aynen korunur. Bu, döngünün rastgele
+/// yürüyüşe dönüp iyi prompt'u bozmasını engeller.
+pub async fn evolve_step<B: LlmBackend + ?Sized>(
+    llm: &B,
+    evaluator: &quine_eval::Evaluator,
+    agent: &Agent,
+    problem: &Problem,
+    model: &str,
+    failures: &[EvaluationResult],
+) -> Result<EvolveStep> {
+    let request = LlmRequest::new(model, agent.system_prompt.clone(), problem.to_llm_prompt());
+    let response = llm.generate(&request).await.context("çözüm üretimi")?;
+    let code = response.extract_code();
+    let result = evaluator.evaluate(agent.id, problem, &code).await;
+
+    if result.success {
+        let mut solved = agent.clone();
+        solved.fitness_score = result.score;
+        return Ok(EvolveStep {
+            agent: solved,
+            result,
+            accepted: true,
+            code,
+        });
+    }
+
+    let engine = MutationEngine::new(llm);
+    let mut report = failures.to_vec();
+    report.push(result.clone());
+    let candidate = match engine.refine_prompt(agent, model, &report).await {
+        Ok(prompt) => agent.mutate_prompt(prompt),
+        Err(e) => {
+            tracing::warn!("refine başarısız ({e:#}); heuristik mutasyon uygulanıyor");
+            agent.mutate_prompt_with_hint(
+                "[ders] Kenar durumları (0, 1, negatif, boş girdi) kontrol et.",
+            )
+        }
+    };
+
+    let accepted = result.score >= agent.fitness_score;
+    let next = if accepted {
+        let mut child = candidate;
+        child.fitness_score = result.score;
+        child
+    } else {
+        agent.clone()
+    };
+    Ok(EvolveStep {
+        agent: next,
+        result,
+        accepted,
+        code,
+    })
+}
+
 /// Bir jenerasyonun tüm ajanlarını `tokio::spawn` ile **paralel** değerlendirir.
 pub async fn evaluate_population(
     llm: Arc<dyn LlmBackend>,
@@ -505,6 +593,21 @@ mod tests {
             .unwrap();
         assert!(new_prompt.contains("kenar durumları"));
         assert!(!new_prompt.contains("```"));
+    }
+
+    #[test]
+    fn first_meaningful_line_skips_code_fence_language_tag() {
+        // Model kuralı ```rust fence'ine sarınca eski kod "rust"u kural sanıyordu.
+        assert_eq!(
+            first_meaningful_line("```rust\nNegatif n için false döndür.\n```"),
+            "Negatif n için false döndür."
+        );
+        assert_eq!(
+            first_meaningful_line("```\n  Kenar durumları kontrol et.  \n```"),
+            "Kenar durumları kontrol et."
+        );
+        assert_eq!(first_meaningful_line("```rust"), "");
+        assert_eq!(first_meaningful_line(""), "");
     }
 
     #[tokio::test]

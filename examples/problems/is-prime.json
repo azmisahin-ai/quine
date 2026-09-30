@@ -1,0 +1,40 @@
+{
+  "id": "ext-is-prime",
+  "title": "Asal Sayı Kontrolü",
+  "description": "n asal ise true döndüren is_prime fonksiyonunu yaz. 1 ve 1den küçük sayılar asal değildir. 2 asaldır.",
+  "function_signature": "pub fn is_prime(n: i64) -> bool { todo!() }",
+  "test_cases": [
+    {
+      "input": 2,
+      "expected": true
+    },
+    {
+      "input": 3,
+      "expected": true
+    },
+    {
+      "input": 4,
+      "expected": false
+    },
+    {
+      "input": 1,
+      "expected": false
+    },
+    {
+      "input": 0,
+      "expected": false
+    },
+    {
+      "input": -7,
+      "expected": false
+    },
+    {
+      "input": 97,
+      "expected": true
+    },
+    {
+      "input": 91,
+      "expected": false
+    }
+  ]
+}

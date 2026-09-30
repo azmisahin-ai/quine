@@ -11,11 +11,9 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use quine_common::Agent;
+use quine_common::{Agent, EvaluationResult};
 use quine_eval::Evaluator;
-use quine_evolution::{
-    evaluate_population, Archive, ArchiveEntry, MutationEngine, PopulationManager,
-};
+use quine_evolution::{evaluate_population, evolve_step, Archive, ArchiveEntry, PopulationManager};
 use quine_guardian::{AuditDecision, AuditLog, DiffAnalyzer};
 use quine_llm::{LlmBackend, LlmRequest, OllamaBackend};
 use std::path::PathBuf;
@@ -366,61 +364,68 @@ async fn cmd_evolve(
     let evaluator = build_evaluator();
 
     let mut agent = Agent::new(format!("evolve-{}", problem.id));
-    let mut last_failures = Vec::new();
+    let mut failures: Vec<EvaluationResult> = Vec::new();
+    let mut best = agent.fitness_score;
 
     for i in 1..=iterations {
         println!(
             "— iterasyon {i}/{iterations} (jenerasyon {}, fitness {:.1}) —",
             agent.generation, agent.fitness_score
         );
-        let req = LlmRequest::new(
-            model.clone(),
-            agent.system_prompt.clone(),
-            problem.to_llm_prompt(),
-        );
-        let resp = backend.generate(&req).await.context("çözüm üretimi")?;
-        let code = resp.extract_code();
-        let result = evaluator.evaluate(agent.id, &problem, &code).await;
-        agent.fitness_score = result.score;
-        println!("  🧾 Üretilen kod:\n{}", indent(&code));
+        let step = evolve_step(
+            backend.as_ref(),
+            &evaluator,
+            &agent,
+            &problem,
+            &model,
+            &failures,
+        )
+        .await?;
+        println!("  🧾 Üretilen kod:\n{}", indent(&step.code));
         println!(
             "  → success={} score={:.1} ({}/{})",
-            result.success, result.score, result.tests_passed, result.tests_total
+            step.result.success,
+            step.result.score,
+            step.result.tests_passed,
+            step.result.tests_total
         );
-        if !result.success && !result.stderr.trim().is_empty() {
-            let err = result.stderr.lines().take(4).collect::<Vec<_>>().join("\n");
+        if !step.result.success && !step.result.stderr.trim().is_empty() {
+            let err = step
+                .result
+                .stderr
+                .lines()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join("\n");
             println!("  ⚠️ hata: {err}");
         }
 
-        if result.success {
-            println!("✅ Problem çözüldü! Prompt güncellemeye gerek yok.");
-            archive_agent(&agent);
+        if step.result.success {
+            println!("✅ Problem çözüldü (iterasyon {i}).");
+            archive_agent(&step.agent);
             return Ok(());
         }
 
-        last_failures.push(result);
-
-        // Başarısızlık varsa: prompt'u evrimleştir (Adım 2.2).
-        let engine = MutationEngine::new(backend.as_ref());
-        match engine.refine_prompt(&agent, &model, &last_failures).await {
-            Ok(new_prompt) => {
-                println!("  🧬 Prompt güncellendi ({} karakter).", new_prompt.len());
-                agent = agent.mutate_prompt(new_prompt);
+        if step.accepted {
+            println!(
+                "  🧬 Mutasyon kabul edildi (fitness {:.1} → {:.1}).",
+                best, step.result.score
+            );
+            if std::env::var("QUINE_SHOW_PROMPT").is_ok() {
+                println!("  📝 Yeni prompt:\n{}", indent(&step.agent.system_prompt));
             }
-            Err(e) => {
-                // Simülasyonda echo metni prompt olarak mantıklı olmayabilir; fallback mutasyon.
-                tracing::warn!("refine başarısız ({e:#}), heuristik mutasyon uygulanıyor");
-                agent = agent.mutate_prompt(format!(
-                    "{}\n[Ders {}] Çıktıyı tam olarak beklenen formatta üret; kenar durumlarını (0, boş liste) kontrol et.",
-                    agent.system_prompt, i
-                ));
-            }
+        } else {
+            println!("  ↩️ Mutasyon reddedildi (fitness {:.1} korunuyor).", best);
         }
+        best = step.agent.fitness_score;
+        failures.push(step.result);
+        agent = step.agent;
     }
     println!(
-        "⚠️ {} iterasyon sonunda problem hâlâ çözülmedi (fitness {:.1}).",
-        iterations, agent.fitness_score
+        "⚠️ {iterations} iterasyon sonunda problem hâlâ çözülmedi (en iyi fitness {:.1}).",
+        best
     );
+    archive_agent(&agent);
     Ok(())
 }
 

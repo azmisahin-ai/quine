@@ -1,0 +1,43 @@
+{
+  "id": "ext-gcd",
+  "title": "EBOB",
+  "description": "İki sayının en büyük ortak bölenini döndüren gcd fonksiyonunu yaz. gcd(0, n) = n mutlak değeri; sonuç her zaman negatif olmayan olsun.",
+  "function_signature": "pub fn gcd(a: i64, b: i64) -> i64 { todo!() }",
+  "test_cases": [
+    {
+      "input": [
+        12,
+        18
+      ],
+      "expected": 6
+    },
+    {
+      "input": [
+        0,
+        5
+      ],
+      "expected": 5
+    },
+    {
+      "input": [
+        0,
+        0
+      ],
+      "expected": 0
+    },
+    {
+      "input": [
+        -4,
+        2
+      ],
+      "expected": 2
+    },
+    {
+      "input": [
+        17,
+        5
+      ],
+      "expected": 1
+    }
+  ]
+}
