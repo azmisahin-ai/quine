@@ -134,3 +134,29 @@ Yeni problem eklerken `quine-bench-simple` içinde hem çözücü stub'ı hem
 Ayrıca tamamlandı: 7b/1.5b karşılaştırması; elitist evrim + başarısız-test
 teşhisi + çok argümanlı harness düzeltmeleri; **Faz 4 CodeMutation** (`mutate`)
 ve guardian kabul kriteri (rm -rf engeli + audit kaydı).
+
+### Faz 5 — Kalıcı çalıştırma + web kontrol düzlemi (tamamlandı)
+
+- `quine-web`: axum REST API + SSE canlı zaman çizelgesi + gömülü dashboard.
+  Yalnızca `127.0.0.1`'e bağlanır; `serve` başka adrese bağlanırsa uyarır.
+  Fail-closed sandbox, gövde boyutu limiti, model doğrulaması, güvenlik
+  başlıkları (CSP/nosniff/DENY), eşzamanlı run limiti (doluysa `429`).
+- `quine-runtime`: klonlanabilir `RunControl`; **duraklat/devam/iptal artık run
+  durumuna ve zaman çizelgesine yansır** (`RUN_PAUSED`/`RUN_RESUMED`), aksi
+  halde kullanıcı panelde donmuş bir ajan görür. Checkpoint döngü başında ve
+  her aday öncesi çağrılır.
+- Demo modu (`serve --demo` / `--simulate`): LLM ve Docker **gerektirmez**;
+  `ScriptedBackend` yapay gecikmeyle çalışır ki adımlar gözle görülsün ve
+  duraklat/iptal anlamlı olsun.
+- `quine-cli`: `serve`, `run`, `doctor`, `history` komutları.
+- Kalite: `fmt` + `clippy -D warnings` temiz; **108 test**; gerçek `quine`
+  ikilisini ayağa kaldıran uçtan uca testler (`crates/quine-cli/tests/cli_serve.rs`):
+  sunucu açılışı, güvenlik başlıkları, demo run'ın uçtan uca `completed`
+  olması, geçersiz girdilerin `400` ile reddi.
+
+**Kullanıcı için tek komut:** `cargo run --bin quine -- serve --demo`
+
+**Bilinen sınır:** bu ortamdan `git push` yapılamıyor — GitHub token'ı
+`azmisahin` kullanıcısına ait ve `azmisahin-ai/quine` deposuna yazma yetkisi
+yok (403). Commit yerelde `main` üzerinde; push kullanıcı tarafından
+yapılmalı.
