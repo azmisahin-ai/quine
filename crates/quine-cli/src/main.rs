@@ -19,6 +19,8 @@ use quine_evolution::{
 };
 use quine_guardian::{AuditDecision, AuditLog, DiffAnalyzer};
 use quine_llm::{LlmBackend, LlmRequest, OllamaBackend};
+use quine_runtime::{RunConfig, RunEngine, RunMode, RunRequest, RuntimeContext};
+use quine_storage::{RunStatus, Store, WorkloadKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -84,6 +86,43 @@ enum Commands {
         /// Kuru çalıştırma: üret ve tara, ama diske yazma
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Web kontrol düzlemini başlatır (canlı dashboard + REST API + SSE)
+    Serve {
+        /// Dinlenecek adres. Varsayılan yalnızca yereldir (güvenli).
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Dinlenecek port
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Harici LLM gerektirmeyen demo modu (deterministik backend).
+        #[arg(long)]
+        demo: bool,
+        /// Tarayıcıyı otomatik açmayı deneme.
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Kalıcı çalıştırma (SQLite): run başlatır, olayları canlı akıtır (Faz 5)
+    Run {
+        /// Yerleşik problem id'si (fib-001 | rev-002 | sum-003)
+        #[arg(long, default_value = "fib-001")]
+        problem: String,
+        /// Çalışma modu: single | evolve | population
+        #[arg(long, default_value = "evolve")]
+        mode: String,
+        /// Sandbox: docker (önerilen) | local (güvensiz)
+        #[arg(long)]
+        sandbox: Option<String>,
+        /// Kullanılacak model (varsayılan: config/env)
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Ortam sağlık kontrolü: Rust, Docker, Ollama, model, sandbox (yeni başlayanlar için)
+    Doctor,
+    /// Kalıcı veritabanındaki geçmiş çalıştırmaları listeler
+    History {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
 }
 
@@ -271,6 +310,20 @@ async fn main() -> Result<()> {
             instruction,
             dry_run,
         } => cmd_mutate(cli.simulate, &file, &instruction, dry_run).await,
+        Commands::Serve {
+            host,
+            port,
+            demo,
+            no_open,
+        } => cmd_serve(host, port, demo, no_open).await,
+        Commands::Run {
+            problem,
+            mode,
+            sandbox,
+            model,
+        } => cmd_run_persistent(cli.simulate, &problem, &mode, sandbox, model).await,
+        Commands::Doctor => cmd_doctor().await,
+        Commands::History { limit } => cmd_history(limit),
     }
 }
 
@@ -641,6 +694,281 @@ fn cmd_guard(cmd: GuardCommands) -> Result<()> {
 
 fn chrono_tag() -> String {
     chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Faz 5 — Kalıcı çalıştırma + web kontrol düzlemi
+// ---------------------------------------------------------------------------
+
+/// `data/quine.db` üzerinde paylaşılan çalışma zamanı bağlamı kurar.
+fn runtime_context() -> Result<RuntimeContext> {
+    std::fs::create_dir_all("data")?;
+    let store = Arc::new(Store::open("data/quine.db")?);
+    // Crash recovery: yarıda kalan run'ları işaretle.
+    let n = store.mark_orphans_interrupted()?;
+    if n > 0 {
+        tracing::warn!("{n} yarıda kalmış run 'interrupted' olarak işaretlendi");
+    }
+    Ok(RuntimeContext::new(store, "data"))
+}
+
+fn resolve_sandbox_kind(cli_sandbox: Option<String>) -> String {
+    let cfg = load_config();
+    cli_sandbox
+        .or_else(|| std::env::var("QUINE_SANDBOX").ok())
+        .or(cfg.sandbox)
+        .unwrap_or_else(|| "docker".into())
+}
+
+fn default_run_config(sandbox: String, model: String) -> RunConfig {
+    RunConfig {
+        model,
+        temperature: quine_llm::temperature_from_env() as f64,
+        sandbox_kind: sandbox,
+        mode: RunMode::Evolve,
+        ..RunConfig::default()
+    }
+}
+
+/// `quine serve` — web kontrol düzlemi.
+async fn cmd_serve(host: String, port: u16, demo: bool, no_open: bool) -> Result<()> {
+    // Güvenlik: varsayılan yalnızca yerel. Uzak adres açıkça istenirse uyar.
+    if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+        eprintln!(
+            "⚠️  DİKKAT: '{host}' adresine bağlanıyorsunuz. Quine kontrol düzlemi kimlik \
+             doğrulaması içermez; yalnızca güvenilir bir ağda ve bilinçli olarak yapın."
+        );
+    }
+    let ctx = runtime_context()?;
+    let cfg = default_run_config(resolve_sandbox_kind(None), resolved_model(&load_config()));
+    let state = quine_web::AppState::new(ctx, cfg).with_simulate(demo);
+
+    let addr: std::net::SocketAddr = format!("{host}:{port}")
+        .parse()
+        .with_context(|| format!("geçersiz adres: {host}:{port}"))?;
+
+    println!("🌐 Quine kontrol düzlemi çalışıyor: http://{addr}");
+    println!("   Tarayıcıda bu adresi açın. Durdurmak için Ctrl+C.");
+    if demo {
+        println!("   ⚡ Demo modu: LLM gerekmez (deterministik backend).");
+    }
+    if !no_open {
+        let url = format!("http://{addr}");
+        // Tarayıcı açma en iyi çaba; başarısız olursa sessizce devam.
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    }
+
+    tokio::select! {
+        r = quine_web::serve(addr, state) => r,
+        _ = tokio::signal::ctrl_c() => {
+            println!("\n👋 Kontrol düzlemi kapatıldı.");
+            Ok(())
+        }
+    }
+}
+
+/// `quine run` — kalıcı, olay akışlı çalıştırma.
+async fn cmd_run_persistent(
+    simulate: bool,
+    problem_id: &str,
+    mode: &str,
+    sandbox: Option<String>,
+    model: Option<String>,
+) -> Result<()> {
+    let problem = select_problem(problem_id)?;
+    let mode = match mode {
+        "single" => RunMode::Single,
+        "evolve" => RunMode::Evolve,
+        "population" => RunMode::Population,
+        other => anyhow::bail!("geçersiz mod: '{other}' (single|evolve|population)"),
+    };
+    let sandbox_kind = resolve_sandbox_kind(sandbox);
+    let model = model.unwrap_or_else(|| resolved_model(&load_config()));
+    let mut cfg = default_run_config(sandbox_kind.clone(), model.clone());
+    cfg.mode = mode;
+
+    let ctx = runtime_context()?;
+    let store = ctx.store.clone();
+    let engine = RunEngine::new(ctx.clone());
+
+    let backend: Option<Arc<dyn LlmBackend>> = if simulate {
+        Some(Arc::new(quine_llm::EchoBackend::fibonacci_solver()))
+    } else {
+        None
+    };
+
+    println!(
+        "🚀 Kalıcı çalıştırma: problem={} mod={:?} sandbox={} model={}",
+        problem.id, mode, sandbox_kind, model
+    );
+
+    // Canlı olay akışına abone ol (bu run'a ait olanları yazdır).
+    let mut rx = ctx.bus.subscribe();
+    let run_id_holder = Arc::new(std::sync::Mutex::new(String::new()));
+
+    let handle = engine.start(RunRequest {
+        problem,
+        workload: if simulate {
+            WorkloadKind::Demo
+        } else {
+            WorkloadKind::Production
+        },
+        config: cfg,
+        backend,
+    })?;
+    let run_id = handle.run_id.clone();
+    *run_id_holder.lock().unwrap() = run_id.clone();
+    println!("   run id: {run_id}");
+    println!("   canlı olaylar:");
+    let _ = store;
+
+    let printer = tokio::spawn(async move {
+        while let Ok(ev) = rx.recv().await {
+            let rid = run_id_holder.lock().unwrap().clone();
+            if ev.run_id != rid {
+                continue;
+            }
+            println!(
+                "   [{:>3}] {:<24} {}",
+                ev.sequence,
+                ev.kind.as_str(),
+                compact_payload(&ev.payload)
+            );
+        }
+    });
+
+    let outcome = handle.wait().await;
+    let _ = printer.await;
+
+    println!(
+        "\n📊 Sonuç: durum={:?} en iyi skor={:.1} başarılı={}",
+        outcome.status, outcome.best_score, outcome.production_success
+    );
+    if let Some(err) = &outcome.error {
+        println!("   hata: {err}");
+    }
+    println!("   Geçmişi görüntüle: cargo run --bin quine -- history");
+    if outcome.status == RunStatus::Completed {
+        Ok(())
+    } else {
+        anyhow::bail!("run başarıyla tamamlanmadı (durum: {:?})", outcome.status)
+    }
+}
+
+fn compact_payload(v: &serde_json::Value) -> String {
+    let s = v.to_string();
+    if s.len() > 120 {
+        format!("{}…", &s[..120.min(s.len())])
+    } else {
+        s
+    }
+}
+
+/// `quine doctor` — yeni başlayanlar için ortam sağlık kontrolü.
+async fn cmd_doctor() -> Result<()> {
+    println!("🩺 Quine ortam kontrolü\n");
+    let mut problems = 0;
+
+    // 1) rustc (sandbox derlemeleri için)
+    match std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+    {
+        Ok(o) if o.status.success() => println!(
+            "✅ Rust derleyici: {}",
+            String::from_utf8_lossy(&o.stdout).trim()
+        ),
+        _ => {
+            println!("❌ Rust derleyici (rustc) bulunamadı — sandbox kod derleyemez.");
+            problems += 1;
+        }
+    }
+
+    // 2) Docker
+    if quine_eval::DockerSandbox::available() {
+        println!("✅ Docker erişilebilir (önerilen sandbox).");
+    } else {
+        println!(
+            "⚠️  Docker erişilemez. `QUINE_SANDBOX=local` ile devam edilebilir ama bu GÜVENSİZ."
+        );
+        problems += 1;
+    }
+
+    // 3) Ollama + model
+    let host =
+        std::env::var("OLLAMA_HOST").unwrap_or_else(|_| quine_llm::DEFAULT_OLLAMA_HOST.into());
+    let model = resolved_model(&load_config());
+    let backend = OllamaBackend::new(host.clone(), model.clone());
+    match backend.list_models().await {
+        Ok(models) => {
+            println!("✅ Ollama bağlı ({host}). Kurulu modeller: {models:?}");
+            if models.iter().any(|m| m == &model) {
+                println!("✅ Varsayılan model kurulu: {model}");
+            } else {
+                println!("⚠️  Varsayılan model '{model}' kurulu değil. Kurun: ollama pull {model}");
+                problems += 1;
+            }
+        }
+        Err(e) => {
+            println!("❌ Ollama'ya ulaşılamıyor ({host}): {e}");
+            println!("   Başlatın: `ollama serve`  ·  Demo için: `quine serve --demo`");
+            problems += 1;
+        }
+    }
+
+    // 4) Veritabanı yazılabilirliği
+    match runtime_context() {
+        Ok(ctx) => println!("✅ Veritabanı hazır: {}", ctx.store.path().display()),
+        Err(e) => {
+            println!("❌ Veritabanı açılamadı: {e}");
+            problems += 1;
+        }
+    }
+
+    println!();
+    if problems == 0 {
+        println!("🎉 Her şey hazır. Başlamak için: quine serve");
+    } else {
+        println!(
+            "ℹ️  {problems} uyarı var. Yine de demo modu ile başlayabilirsiniz: quine serve --demo"
+        );
+    }
+    Ok(())
+}
+
+/// `quine history` — kalıcı run geçmişi.
+fn cmd_history(limit: usize) -> Result<()> {
+    let store = Store::open("data/quine.db")?;
+    let runs = store.list_runs(limit)?;
+    if runs.is_empty() {
+        println!("Kayıt yok. Başlamak için: cargo run --bin quine -- run --mode evolve");
+        return Ok(());
+    }
+    println!(
+        "{:<10} {:<12} {:<22} {:>7} {:>6} BASARILI",
+        "RUN", "DURUM", "PROBLEM", "SKOR", "GEN"
+    );
+    for r in &runs {
+        println!(
+            "{:<10} {:<12} {:<22} {:>7.1} {:>6} {}",
+            &r.id[..8.min(r.id.len())],
+            quine_runtime::status_label(r.status),
+            r.problem_title,
+            r.best_score,
+            r.generation,
+            if r.production_success {
+                "evet"
+            } else {
+                "hayır"
+            }
+        );
+    }
+    let m = store.metrics()?;
+    println!(
+        "\nToplam: {} run · {} tamamlandı · {} başarısız · {} değerlendirme · {} guardian bloku",
+        m.runs_total, m.runs_completed, m.runs_failed, m.evaluations_total, m.guardian_blocks
+    );
+    Ok(())
 }
 
 fn indent(s: &str) -> String {

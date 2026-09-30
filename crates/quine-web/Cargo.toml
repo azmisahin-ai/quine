@@ -1,36 +1,31 @@
 [package]
-name = "quine-cli"
+name = "quine-web"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Quine: komut satırı arayüzü (init, test-llm, run-once, evolve, population, guard)"
-
-[[bin]]
-name = "quine"
-path = "src/main.rs"
+description = "Quine: local web control plane (axum + SSE)"
 
 [dependencies]
 quine-common.workspace = true
+quine-runtime.workspace = true
+quine-storage.workspace = true
 quine-llm.workspace = true
 quine-eval.workspace = true
-quine-evolution.workspace = true
-quine-guardian.workspace = true
 quine-bench-simple.workspace = true
-quine-storage.workspace = true
-quine-runtime.workspace = true
-quine-web.workspace = true
+
+axum.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
 anyhow.workspace = true
-clap.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]
+tower.workspace = true
 tempfile.workspace = true
-reqwest.workspace = true

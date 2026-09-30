@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Quine — Kendini geliştiren kod ajanı</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <div>
+        <h1>Quine</h1>
+        <p class="tagline">Kendi kendini geliştiren kod ajanı — canlı kontrol paneli</p>
+      </div>
+    </div>
+    <div class="status-pills" id="statusPills">
+      <span class="pill" id="pillOllama">Ollama: <b>kontrol ediliyor…</b></span>
+      <span class="pill" id="pillDocker">Docker: <b>kontrol ediliyor…</b></span>
+      <span class="pill" id="pillSandbox">Sandbox: <b>—</b></span>
+      <span class="pill" id="pillVersion">sürüm —</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="card wide" id="alertBar" hidden>
+      <div class="alert" id="alertText"></div>
+    </section>
+
+    <section class="card">
+      <h2>1 · Ne yapacağını seç</h2>
+      <p class="muted">Bir problem seç, çalışma modunu belirle ve başlat. Ajan kodu üretir,
+        güvenlik kapısından geçirir, izole sandbox'ta çalıştırır, test eder ve hatalardan ders çıkarır.</p>
+      <div class="grid">
+        <label>Problem
+          <select id="problemSelect"></select>
+        </label>
+        <label>Mod
+          <select id="modeSelect">
+            <option value="evolve" selected>Evrim (hatalardan öğrenir)</option>
+            <option value="single">Tek deneme</option>
+            <option value="population">Popülasyon (çok ajan)</option>
+          </select>
+        </label>
+        <label>Model
+          <input id="modelInput" type="text" placeholder="qwen2.5-coder:1.5b" />
+        </label>
+        <label>Sandbox
+          <select id="sandboxSelect">
+            <option value="docker">docker (önerilen)</option>
+            <option value="local">local (yalnızca geliştirme)</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <button id="startBtn" class="primary">▶ Çalıştır</button>
+        <button id="demoBtn" class="secondary">⚡ Hızlı demo (LLM gerekmez)</button>
+        <span class="muted" id="startHint"></span>
+      </div>
+    </section>
+
+    <section class="card wide" id="runCard" hidden>
+      <h2>2 · Canlı çalışma</h2>
+      <div class="runmeta">
+        <div><span class="k">Run</span><span class="v mono" id="runId">—</span></div>
+        <div><span class="k">Durum</span><span class="v" id="runStatus">—</span></div>
+        <div><span class="k">Jenerasyon</span><span class="v" id="runGen">0</span></div>
+        <div><span class="k">En iyi skor</span><span class="v" id="runScore">0</span></div>
+        <div><span class="k">LLM çağrısı</span><span class="v" id="runLlm">0</span></div>
+      </div>
+      <div class="progress"><div class="bar" id="scoreBar"></div></div>
+      <div class="row">
+        <button id="pauseBtn" class="secondary">⏸ Duraklat</button>
+        <button id="resumeBtn" class="secondary">▶ Devam</button>
+        <button id="cancelBtn" class="danger">■ İptal</button>
+      </div>
+    </section>
+
+    <section class="card wide" id="timelineCard" hidden>
+      <h2>3 · Ne oldu? (canlı adım adım)</h2>
+      <p class="muted">Her satır ajanın bir adımıdır. Sol taraftaki işaret o adımın sonucunu gösterir.</p>
+      <ol class="timeline" id="timeline"></ol>
+    </section>
+
+    <section class="card wide" id="candCard" hidden>
+      <h2>4 · Denenen çözümler ve puanları</h2>
+      <p class="muted">Her jenerasyonda üretilen kod ve aldığı puan. Yeşil = tüm testler geçti.</p>
+      <table class="table" id="candTable">
+        <thead><tr><th>Jenerasyon</th><th>Skor</th><th>Test</th><th>Δ</th><th>Durum</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="card wide">
+      <h2>Sistem</h2>
+      <div class="runmeta" id="sysInfo"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span id="footerNote">Quine · yerel çalışır · tüm veriler bu makinede</span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

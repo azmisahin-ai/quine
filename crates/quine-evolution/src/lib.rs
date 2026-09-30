@@ -744,7 +744,18 @@ mod tests {
             .await
             .unwrap();
         assert!(new_prompt.contains("kenar durumları"));
-        assert!(!new_prompt.contains("```"));
+        // Kural satırı düz yazı olmalı; kod/fence sızmamalı. (Taban prompt
+        // biçim örneği olarak fence içerebilir, o yüzden yalnızca [ders]
+        // satırları kontrol edilir.)
+        for line in new_prompt
+            .lines()
+            .filter(|l| l.trim_start().starts_with("[ders]"))
+        {
+            assert!(
+                !line.contains("```"),
+                "kural satırı fence içermemeli: {line}"
+            );
+        }
     }
 
     #[test]

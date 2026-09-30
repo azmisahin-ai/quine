@@ -78,6 +78,7 @@ cargo build --workspace
 
 ```bash
 cargo run --bin quine -- init                     # data/ + config
+cargo run --bin quine -- doctor                   # ortam sağlık kontrolü (Rust/Docker/Ollama)
 cargo run --bin quine -- test-llm                 # LLM bağlantısı (Faz 0)
 cargo run --bin quine -- run-once --problem fib-001   # tek problem (Faz 1)
 cargo run --bin quine -- evolve --iterations 5        # prompt evrimi (Faz 2)
@@ -86,9 +87,40 @@ cargo run --bin quine -- guard check dosya.rs         # güvenlik taraması (Faz
 cargo run --bin quine -- mutate dosya.rs --instruction "..."   # kod mutasyonu (Faz 4)
 ```
 
-### 3. LLM'siz (simülasyon) mod
+### 3. Canlı panel (web kontrol düzlemi)
 
-Ollama kurmadan tüm döngüyü deterministik `EchoBackend` ile çalıştırabilirsiniz:
+En hızlı yol — hiçbir şey kurmadan paneli açıp ajanın nasıl çalıştığını
+izleyin:
+
+```bash
+cargo run --bin quine -- serve --demo
+```
+
+Bu komut tarayıcıda `http://127.0.0.1:8099` adresini açar. Panelde:
+
+* **Çalıştır** düğmesiyle bir ajan başlatın; adımları (LLM isteği → kod →
+  guardian → sandbox → test → puan) **canlı** olarak zaman çizelgesinde görün.
+* **Duraklat / Devam / İptal** ile çalışmayı yönetin.
+* Geçmiş çalıştırmaları, aday kodları ve ölçümleri inceleyin.
+
+`--demo` modu Ollama ve Docker **gerektirmez**; sabit senaryoyla (ilk deneme
+hatalı kod, ikinci deneme düzeltilmiş kod) öğrenme döngüsünü gösterir. Gerçek
+modellerle aynı paneli kullanmak için:
+
+```bash
+cargo run --bin quine -- serve        # Ollama + (önerilen) Docker sandbox
+```
+
+Komut satırından kalıcı çalıştırma ve geçmiş:
+
+```bash
+cargo run --bin quine -- run --mode evolve --problem fib-001   # SQLite'a yazar, olayları akıtır
+cargo run --bin quine -- history                               # geçmiş çalıştırmalar
+```
+
+### 4. LLM'siz (simülasyon) mod
+
+Ollama kurmadan tüm döngüyü deterministik backend ile çalıştırabilirsiniz:
 
 ```bash
 cargo run --bin quine -- --simulate run-once
@@ -102,8 +134,9 @@ cargo run --bin quine -- --simulate evolve --iterations 3
 | Değişken | Varsayılan | Açıklama |
 |----------|-----------|----------|
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama sunucu adresi |
-| `QUINE_MODEL` | `qwen2.5-coder:7b` | Kullanılacak model |
+| `QUINE_MODEL` | `qwen2.5-coder:1.5b` | Kullanılacak model |
 | `QUINE_SANDBOX` | `local` | `local` \| `docker`. `docker` seçiliyken Docker erişilemezse çalışma **durur** (sessizce `local`'e düşülmez). |
+| `QUINE_TEMPERATURE` | `0.2` | Örnekleme sıcaklığı (`0.0` = deterministik) |
 | `RUST_LOG` | `info` | Log seviyesi |
 
 ---
@@ -116,8 +149,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Mevcut durum (2026-09-29): workspace **hatasız derlenir**, **33 test geçer**,
-clippy temiz, gerçek LLM ile `run-once` çalışır. Ayrıntı: `docs/EXECUTION_PLAN.md`.
+Mevcut durum (2026-09-30): workspace **hatasız derlenir**, **108 test geçer**
+(gerçek `quine` ikilisini ayağa kaldıran uçtan uca testler dahil), `fmt` ve
+`clippy` temiz, gerçek LLM (Ollama) ile `run-once` çalışır. Ayrıntı:
+`docs/EXECUTION_PLAN.md`.
 
 ---
 

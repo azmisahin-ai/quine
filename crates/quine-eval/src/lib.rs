@@ -464,8 +464,8 @@ impl LocalProcessSandbox {
         let stdin_lines: String = problem
             .test_cases
             .iter()
-            .map(|t| format!("{}\n", compact_json(&t.input)))
-            .collect();
+            .map(|t| compact_json(&t.input).map(|s| format!("{s}\n")))
+            .collect::<Result<String>>()?;
 
         let mut child = tokio::process::Command::new(&bin_path)
             .stdin(Stdio::piped())
@@ -525,18 +525,25 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Test girdisini sandbox'ın mini-parser'ının beklediği tek satırlık forma çevirir.
-fn compact_json(v: &serde_json::Value) -> String {
-    match v {
+///
+/// Kritik ilke: **hiçbir girdi sessizce başka bir değere dönüştürülmez**.
+/// Dizide i64 olmayan bir eleman varsa bu bir veri kaybı hatasıdır; `unwrap_or(0)`
+/// gibi sessiz substitute üretmek yerine hata döneriz (bkz. `UNSUPPORTED_TEST_INPUT`).
+fn compact_json(v: &serde_json::Value) -> Result<String> {
+    Ok(match v {
         serde_json::Value::String(s) => json_quote(s),
         serde_json::Value::Array(items) => {
-            let parts: Vec<String> = items
-                .iter()
-                .map(|i| i.as_i64().unwrap_or(0).to_string())
-                .collect();
+            let mut parts = Vec::with_capacity(items.len());
+            for i in items {
+                let n = i.as_i64().ok_or_else(|| {
+                    anyhow!("UNSUPPORTED_TEST_INPUT: dizide i64 olmayan eleman: {i}")
+                })?;
+                parts.push(n.to_string());
+            }
             format!("[{}]", parts.join(","))
         }
         other => other.to_string(),
-    }
+    })
 }
 
 fn json_quote(s: &str) -> String {
@@ -557,26 +564,49 @@ fn json_quote(s: &str) -> String {
 // Docker sandbox (Faz 4 — tam izolasyon, sessiz yerel fallback yok)
 // ---------------------------------------------------------------------------
 
-/// Faz 4: `docker run --network none --memory ... --cpus ... --pids-limit ...`
-/// ile tam izolasyon. Docker bulunamazsa **hata verir** (sessizce yerel sandbox'a
+/// Faz 4: `docker run --network none --read-only --cap-drop ALL ...` ile tam
+/// izolasyon. Docker bulunamazsa **hata verir** (sessizce yerel sandbox'a
 /// düşmez; bkz. [`sandbox_from_kind`]).
+///
+/// Güvenlik sertleştirmesi (production):
+/// * `--network none` — ağ erişimi yok
+/// * `--read-only` — kök dosya sistemi salt-okunur
+/// * `--tmpfs /tmp` — sınırlı, yazılabilir geçici alan (derleme çıktısı)
+/// * `--cap-drop ALL` — tüm Linux capability'leri düşürülür
+/// * `--security-opt no-new-privileges` — yetki yükseltme engellenir
+/// * `--pids-limit` / `--memory` / `--cpus` — kaynak sınırları
+/// * `--user` — non-root (nobody)
+/// * girdi mount'u `:ro` — ajan girdi dosyasını değiştiremez
 #[derive(Debug, Clone)]
 pub struct DockerSandbox {
+    /// Sabitlenmiş imaj (örn. `rust:1.83-slim-bookworm`). `latest` kullanılmaz.
     pub image: String,
+    /// Opsiyonel imaj digest'i (`sha256:...`) — verilirse `image@digest` kullanılır.
+    pub image_digest: Option<String>,
     pub limits: SandboxLimits,
     pub cpus: String,
     pub memory: String,
     pub pids_limit: u32,
+    /// Çalıştırılacak kullanıcı (`uid:gid`). Non-root olmalı.
+    pub user: String,
+    /// Yazılabilir geçici alan boyutu (`--tmpfs /tmp`).
+    pub tmpfs_size: String,
 }
+
+/// Sandbox imajı için sabitlenmiş varsayılan (mutable `latest` yasak).
+pub const DEFAULT_SANDBOX_IMAGE: &str = "rust:1.83-slim-bookworm";
 
 impl Default for DockerSandbox {
     fn default() -> Self {
         Self {
-            image: "rust:1-slim-bookworm".into(),
+            image: DEFAULT_SANDBOX_IMAGE.into(),
+            image_digest: None,
             limits: SandboxLimits::default(),
             cpus: "1.0".into(),
             memory: "512m".into(),
             pids_limit: 256,
+            user: "65534:65534".into(),
+            tmpfs_size: "64m".into(),
         }
     }
 }
@@ -590,6 +620,14 @@ impl DockerSandbox {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    /// İmaj referansı: digest verilmişse `image@digest`, aksi halde `image`.
+    pub fn image_ref(&self) -> String {
+        match &self.image_digest {
+            Some(d) if !d.is_empty() => format!("{}@{}", self.image, d),
+            _ => self.image.clone(),
+        }
     }
 }
 
@@ -616,47 +654,78 @@ impl DockerSandbox {
         }
         let harness = build_harness_source(problem)?;
         let full_src = bench::inject_solution(&harness, llm_code);
+        if !llm_code.contains("fn ") && !llm_code.contains("fn(") {
+            // Kod üretilmemiş: derleyiciye boşuna göndermek yerine açık hata ver.
+            return Ok(RunOutput {
+                stderr: "EMPTY_SOLUTION: model kod üretmedi".into(),
+                duration: Duration::ZERO,
+                ..Default::default()
+            });
+        }
         let dir = std::env::temp_dir().join(format!("quine-docker-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("main.rs"), &full_src)?;
+        // Container, `nobody` (65534) olarak çalışır ve `:ro` mount'u okuyabilmeli.
+        make_world_readable(&dir);
 
         let started = Instant::now();
         let secs = self.limits.timeout.as_secs();
         let stdin_lines: String = problem
             .test_cases
             .iter()
-            .map(|t| format!("{}\n", compact_json(&t.input)))
-            .collect();
+            .map(|t| compact_json(&t.input).map(|s| format!("{s}\n")))
+            .collect::<Result<String>>()?;
+
+        // Sabit bir isim veririz ki cancel/timeout durumunda container'ı
+        // kesin olarak öldürebilelim (orphan bırakmama ilkesi).
+        let name = format!("quine-sbx-{}", Uuid::new_v4().simple());
+        let image_ref = self.image_ref();
+        // NOT: `exec` ZORUNLU — Docker'ın `--tmpfs` varsayılanı `noexec` içerir,
+        // bu yüzden açıkça vermezsek derlenen ikili çalıştırılamaz
+        // ("Permission denied"). `noexec` burada güvenlik kazancı sağlamaz:
+        // zaten çalıştırılacak kod bu sandbox'ın amacıdır.
+        let tmpfs = format!("/tmp:rw,exec,nosuid,size={}", self.tmpfs_size);
 
         let mut child = tokio::process::Command::new("docker")
             .args([
                 "run",
                 "--rm",
                 "-i",
+                "--name",
+                &name,
                 "--network",
                 "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--pids-limit",
+                &self.pids_limit.to_string(),
                 "--memory",
                 &self.memory,
                 "--cpus",
                 &self.cpus,
-                "--pids-limit",
-                &self.pids_limit.to_string(),
-                "--security-opt",
-                "no-new-privileges",
+                "--user",
+                &self.user,
+                "--tmpfs",
+                &tmpfs,
                 "-v",
             ])
             .arg(format!("{}:/work:ro", dir.display()))
             .arg("-w")
             .arg("/work")
-            .arg(&self.image)
+            .arg(&image_ref)
             .args([
                 "sh",
                 "-c",
+                // rustc çıktısı /tmp'ye yazılır (read-only rootfs'te tek yazılabilir alan).
                 &format!("timeout {secs} sh -c 'rustc --edition 2021 -o /tmp/h main.rs && /tmp/h'"),
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .context("docker çalıştırılamadı")?;
 
@@ -683,7 +752,12 @@ impl DockerSandbox {
                 );
                 output.exit_code = o.status.code();
             }
-            Err(_) => output.timed_out = true,
+            Err(_) => {
+                output.timed_out = true;
+                // Zaman aşımında container'ı zorla öldür: `docker run` süreci
+                // düşse bile container arkada kalmamalı.
+                force_kill_container(&name);
+            }
         }
         output.duration = started.elapsed();
         cleanup(&dir);
@@ -691,30 +765,69 @@ impl DockerSandbox {
     }
 }
 
-/// Hangi sandbox'ın kullanılacağını belirler (`QUINE_SANDBOX=local|docker`).
-pub fn sandbox_from_env() -> Result<Box<dyn Sandbox>> {
-    sandbox_from_kind(&std::env::var("QUINE_SANDBOX").unwrap_or_default())
+/// Container içeriğini `nobody` kullanıcısı okuyabilsin diye izinleri açar.
+fn make_world_readable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let _ = std::fs::set_permissions(e.path(), std::fs::Permissions::from_mode(0o644));
+        }
+    }
 }
 
-/// Verilen tür adına göre sandbox üretir ("docker" → `DockerSandbox`, aksi halde yerel).
+/// Bir container'ı isimle zorla kaldırır (orphan temizliği).
+fn force_kill_container(name: &str) {
+    let _ = std::process::Command::new("docker")
+        .args(["rm", "-f", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Hangi sandbox'ın kullanılacağını belirler.
 ///
-/// Güvenlik ilkesi: `docker` açıkça istendiyse ama erişilemiyorsa **sessizce
-/// yerel sandbox'a düşmek yoktur** — bu, ajan kodunun ana sistemde çalışmasına
-/// yol açardı. Bunun yerine hata döneriz.
+/// **Production varsayılanı `docker`**'dır. `QUINE_SANDBOX` ayarlı değilse
+/// docker seçilir; yerel çalıştırma yalnızca **açıkça** `local` yazılarak
+/// istenebilir (güvensiz).
+pub fn sandbox_from_env() -> Result<Box<dyn Sandbox>> {
+    let kind = std::env::var("QUINE_SANDBOX").unwrap_or_else(|_| "docker".to_string());
+    sandbox_from_kind(&kind)
+}
+
+/// Verilen tür adına göre sandbox üretir.
+///
+/// Güvenlik ilkeleri (fail-closed):
+/// * Bilinmeyen/boş tür **hata** döner; hiçbir zaman daha az güvenli bir moda
+///   sessizce düşülmez.
+/// * `docker` açıkça istendiyse ama erişilemiyorsa **hata** döner (yerel'e düşmez).
+/// * `local` yalnızca açıkça istenirse kullanılır; bu mod LLM kodunu ana
+///   sistemde çalıştırır ve production için uygun değildir.
 pub fn sandbox_from_kind(kind: &str) -> Result<Box<dyn Sandbox>> {
-    match kind {
+    match kind.trim() {
         "docker" => {
             if !DockerSandbox::available() {
                 bail!(
                     "sandbox=docker istendi ama Docker erişilemez (daemon kapalı veya \
                      kullanıcı `docker` grubunda değil). Yerel sandbox'a sessizce düşmek \
-                     yerine duruyoruz; `QUINE_SANDBOX=local` ile açıkça seçebilirsiniz."
+                     yerine duruyoruz; `QUINE_SANDBOX=local` ile açıkça seçebilirsiniz \
+                     (güvensiz, yalnızca geliştirme için)."
                 );
             }
             Ok(Box::new(DockerSandbox::default()))
         }
-        _ => Ok(Box::new(LocalProcessSandbox::default())),
+        "local" => Ok(Box::new(LocalProcessSandbox::default())),
+        other => bail!(
+            "geçersiz sandbox türü: '{other}'. Geçerli değerler: 'docker' (production \
+             varsayılanı) veya 'local' (güvensiz, yalnızca geliştirme). Bilinmeyen bir \
+             değer daha az güvenli moda düşmez."
+        ),
     }
+}
+
+/// Sandbox türünün güvensiz (yerel) olup olmadığını belirtir.
+pub fn is_unsafe_local(kind: &str) -> bool {
+    kind.trim() == "local"
 }
 
 // ---------------------------------------------------------------------------
@@ -871,6 +984,164 @@ fn normalize(s: &str) -> String {
     s.trim().trim_matches('"').to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Workspace evaluator (production: fonksiyon problemlerine bağımlı değil)
+// ---------------------------------------------------------------------------
+
+/// Bir aday çalışma alanında derleme/test komutunun sonucu.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceResult {
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+    pub duration: Duration,
+}
+
+/// Gerçek proje çalışma alanlarını (crate/workspace) değerlendiren evaluator.
+///
+/// [`build_harness_source`] tabanlı fonksiyon harness'inden farkı: burada
+/// **yapılandırılmış** bir komut (`program` + `args`) çalıştırılır. Test
+/// komutu asla ham shell string'i olarak LLM tarafından belirlenmez ve shell
+/// interpolation yapılmaz — bu, command injection'ı yapısal olarak engeller.
+pub struct WorkspaceEvaluator {
+    /// Program adı (örn. `cargo`). LLM girdisi değildir.
+    pub program: String,
+    /// Argümanlar (örn. `["test", "--workspace"]`).
+    pub args: Vec<String>,
+    pub timeout: Duration,
+    pub max_output_bytes: usize,
+    /// Docker ile mi çalıştırılsın (production) yoksa host'ta mı (geliştirme)?
+    pub use_docker: bool,
+    pub image: String,
+    pub memory: String,
+    pub cpus: String,
+}
+
+impl Default for WorkspaceEvaluator {
+    fn default() -> Self {
+        Self {
+            program: "cargo".into(),
+            args: vec!["test".into(), "--workspace".into()],
+            timeout: Duration::from_secs(300),
+            max_output_bytes: 256 * 1024,
+            use_docker: true,
+            image: DEFAULT_SANDBOX_IMAGE.into(),
+            memory: "1g".into(),
+            cpus: "2.0".into(),
+        }
+    }
+}
+
+impl WorkspaceEvaluator {
+    /// `workspace` dizininde yapılandırılmış komutu çalıştırır.
+    pub async fn run(&self, workspace: &Path) -> Result<WorkspaceResult> {
+        let workspace = workspace
+            .canonicalize()
+            .with_context(|| format!("çalışma alanı bulunamadı: {}", workspace.display()))?;
+        let started = Instant::now();
+
+        if self.use_docker {
+            self.run_docker(&workspace, started).await
+        } else {
+            self.run_local(&workspace, started).await
+        }
+    }
+
+    async fn run_local(&self, workspace: &Path, started: Instant) -> Result<WorkspaceResult> {
+        let mut cmd = tokio::process::Command::new(&self.program);
+        cmd.args(&self.args)
+            .current_dir(workspace)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let out = tokio::time::timeout(self.timeout, cmd.output()).await;
+        Ok(match out {
+            Ok(o) => {
+                let o = o.context("çalışma alanı komutu başlatılamadı")?;
+                WorkspaceResult {
+                    success: o.status.success(),
+                    exit_code: o.status.code(),
+                    stdout: truncate(&String::from_utf8_lossy(&o.stdout), self.max_output_bytes),
+                    stderr: truncate(&String::from_utf8_lossy(&o.stderr), self.max_output_bytes),
+                    timed_out: false,
+                    duration: started.elapsed(),
+                }
+            }
+            Err(_) => WorkspaceResult {
+                timed_out: true,
+                duration: started.elapsed(),
+                ..Default::default()
+            },
+        })
+    }
+
+    async fn run_docker(&self, workspace: &Path, started: Instant) -> Result<WorkspaceResult> {
+        if !DockerSandbox::available() {
+            bail!("workspace evaluator: docker erişilemez; sessizce yerel moda düşülmüyor");
+        }
+        let name = format!("quine-ws-{}", Uuid::new_v4().simple());
+        let secs = self.timeout.as_secs();
+        // Komut argümanları doğrudan container'a verilir (shell yok → injection yok).
+        // Çalışma alanı :rw mount edilir (cargo target/ yazar); geri kalanı hardened.
+        let mut cmd = tokio::process::Command::new("docker");
+        cmd.args([
+            "run",
+            "--rm",
+            "--name",
+            &name,
+            "--network",
+            "none",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "512",
+            "--memory",
+            &self.memory,
+            "--cpus",
+            &self.cpus,
+            "-v",
+        ])
+        .arg(format!("{}:/work", workspace.display()))
+        .arg("-w")
+        .arg("/work")
+        .arg(&self.image)
+        .arg("timeout")
+        .arg(secs.to_string())
+        .arg(&self.program)
+        .args(&self.args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+        let out = tokio::time::timeout(self.timeout + Duration::from_secs(15), cmd.output()).await;
+        Ok(match out {
+            Ok(o) => {
+                let o = o.context("docker workspace komutu başlatılamadı")?;
+                WorkspaceResult {
+                    success: o.status.success(),
+                    exit_code: o.status.code(),
+                    stdout: truncate(&String::from_utf8_lossy(&o.stdout), self.max_output_bytes),
+                    stderr: truncate(&String::from_utf8_lossy(&o.stderr), self.max_output_bytes),
+                    timed_out: false,
+                    duration: started.elapsed(),
+                }
+            }
+            Err(_) => {
+                force_kill_container(&name);
+                WorkspaceResult {
+                    timed_out: true,
+                    duration: started.elapsed(),
+                    ..Default::default()
+                }
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,11 +1149,23 @@ mod tests {
     use quine_common::TestCase;
 
     #[test]
-    fn sandbox_from_kind_defaults_to_local() {
-        // Boş/`local` → yerel sandbox; sessiz docker denemesi yok.
-        assert_eq!(sandbox_from_kind("").unwrap().kind(), "local");
+    fn sandbox_from_kind_local_requires_explicit_opt_in() {
+        // `local` yalnızca açıkça istendiğinde seçilir.
         assert_eq!(sandbox_from_kind("local").unwrap().kind(), "local");
-        assert_eq!(sandbox_from_kind("bilinmeyen").unwrap().kind(), "local");
+    }
+
+    #[test]
+    fn sandbox_from_kind_invalid_is_fail_closed() {
+        // Güvenlik regresyonu: bilinmeyen/boş tür HATA döner, sessizce local'e düşmez.
+        assert!(sandbox_from_kind("").is_err(), "boş tür hata vermeli");
+        assert!(
+            sandbox_from_kind("banana").is_err(),
+            "bilinmeyen tür hata vermeli"
+        );
+        assert!(
+            sandbox_from_kind("Local").is_err(),
+            "büyük/küçük harf duyarlı"
+        );
     }
 
     #[test]
@@ -900,11 +1183,34 @@ mod tests {
     }
 
     #[test]
+    fn docker_sandbox_defaults_are_hardened() {
+        let d = DockerSandbox::default();
+        assert!(!d.image.contains(":latest"), "mutable latest tag yasak");
+        assert_eq!(d.user, "65534:65534", "non-root çalışmalı");
+        assert!(d.pids_limit > 0);
+        assert_eq!(d.image_ref(), d.image);
+        // Digest verilirse image@digest biçimine geçer.
+        let mut d2 = d.clone();
+        d2.image_digest = Some("sha256:abc".into());
+        assert_eq!(d2.image_ref(), format!("{}@sha256:abc", d.image));
+    }
+
+    #[test]
+    fn compact_json_rejects_unsupported_elements() {
+        // Sessiz veri kaybı yasak: i64 olmayan eleman hata vermeli.
+        assert!(compact_json(&serde_json::json!([1, "x"])).is_err());
+        assert!(compact_json(&serde_json::json!([1, 2.5])).is_err());
+    }
+
+    #[test]
     fn compact_json_formats_inputs() {
-        assert_eq!(compact_json(&serde_json::json!(10)), "10");
-        assert_eq!(compact_json(&serde_json::json!("abc")), "\"abc\"");
-        assert_eq!(compact_json(&serde_json::json!([1, 2, 3])), "[1,2,3]");
-        assert_eq!(compact_json(&serde_json::json!([])), "[]");
+        assert_eq!(compact_json(&serde_json::json!(10)).unwrap(), "10");
+        assert_eq!(compact_json(&serde_json::json!("abc")).unwrap(), "\"abc\"");
+        assert_eq!(
+            compact_json(&serde_json::json!([1, 2, 3])).unwrap(),
+            "[1,2,3]"
+        );
+        assert_eq!(compact_json(&serde_json::json!([])).unwrap(), "[]");
     }
 
     #[test]

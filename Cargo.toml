@@ -6,6 +6,9 @@ members = [
     "crates/quine-eval",
     "crates/quine-evolution",
     "crates/quine-guardian",
+    "crates/quine-storage",
+    "crates/quine-runtime",
+    "crates/quine-web",
     "crates/quine-cli",
     "benchmarks/quine-bench-simple",
 ]
@@ -23,15 +26,24 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Async runtime & HTTP (local only – see Core Principle #2)
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "fs", "sync", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "fs", "sync", "io-util", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 anyhow = "1"
 thiserror = "2"
 
+# Web control plane (local-only dashboard; no frontend toolchain)
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["limit", "trace", "set-header"] }
+tower = { version = "0.5", features = ["util"] }
+futures = "0.3"
+
+# Persistence (SQLite; bundled = self-contained, no system libsqlite dependency)
+rusqlite = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -46,6 +58,9 @@ quine-llm = { path = "crates/quine-llm" }
 quine-eval = { path = "crates/quine-eval" }
 quine-evolution = { path = "crates/quine-evolution" }
 quine-guardian = { path = "crates/quine-guardian" }
+quine-storage = { path = "crates/quine-storage" }
+quine-runtime = { path = "crates/quine-runtime" }
+quine-web = { path = "crates/quine-web" }
 quine-bench-simple = { path = "benchmarks/quine-bench-simple" }
 
 [profile.release]

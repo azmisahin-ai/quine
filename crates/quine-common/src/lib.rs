@@ -75,10 +75,16 @@ impl Agent {
 }
 
 /// Ajanın varsayılan sistem prompt'u (Turkish, code-focused).
+///
+/// Küçük yerel modeller, "fonksiyon gövdesi" gibi belirsiz ifadelerle sık sık
+/// açıklama metni üretir. Prompt bu yüzden **tek bir kod bloğu** ve **tam
+/// fonksiyon tanımı** ister; bu, harness'ın beklediği biçimle birebir uyuşur.
 pub fn default_system_prompt() -> &'static str {
-    "Sen deneyimli bir Rust geliştiricisisin. Sana verilen problemi çözmen \
-     istenecek. Yalnızca istenen fonksiyonun gövdesini içeren, derlenebilir \
-     ve test edilebilir saf Rust kodu üret. Kod dışında açıklama yapma."
+    "Sen deneyimli bir Rust geliştiricisisin. Sana verilen fonksiyonu \
+     TAM TANIM olarak yaz. Yanıtın YALNIZCA tek bir ```rust kod bloğu içermeli; \
+     blok içinde fonksiyonun tamamı (imza ve gövde) bulunmalı. \
+     Örnek: ```rust\\npub fn f(x: i64) -> i64 { x + 1 }\\n``` \
+     Açıklama, muhakeme veya kod dışı metin YAZMA."
 }
 
 /// Tek bir girdi/beklenen çıktı çifti. Değerler JSON olarak tutulur ki
