@@ -88,6 +88,7 @@
       <h2>4 · Denenen çözümler, puanları ve öğrenilen dersler</h2>
       <p class="muted">Her jenerasyonda üretilen kod, aldığı puan ve başarısızlıktan çıkarılan ders.
         Yeşil = tüm testler geçti. Satıra tıklayınca kod ve değişiklik (diff) görünür.</p>
+      <div id="scoreChart" class="chart"></div>
       <table class="table" id="candTable">
         <thead><tr><th>Jen.</th><th>Skor</th><th>Test</th><th>Δ</th><th>Durum</th><th>Hata nedeni</th><th>Öğrenilen ders</th></tr></thead>
         <tbody></tbody>
@@ -107,6 +108,16 @@
       <p class="muted">Tüm çalıştırmaların özeti. Ortalama skor tüm sonuçlanmış çalıştırmaları kapsar
         (yalnızca başarılıları değil), bu yüzden gerçek ilerlemeyi yansıtır.</p>
       <div class="runmeta" id="metricsInfo"></div>
+    </section>
+
+    <section class="card wide">
+      <h2>7 · Geçmiş çalıştırmalar</h2>
+      <p class="muted">Bu makinede yapılan tüm çalıştırmalar. Bir satıra tıklayınca o çalışmanın
+        canlı sonuçları yüklenir.</p>
+      <table class="table" id="runsTable">
+        <thead><tr><th>Zaman</th><th>Problem</th><th>Mod</th><th>Durum</th><th>Skor</th></tr></thead>
+        <tbody></tbody>
+      </table>
     </section>
 
     <section class="card wide">

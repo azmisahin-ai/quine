@@ -255,6 +255,7 @@ async function refreshRun(id) {
       clearInterval(pollTimer); pollTimer = null;
       refreshCandidates(id);
       loadMetrics();
+      loadRuns();
       if (r.status === "completed" && r.production_success) {
         hideAlert();
       } else if (r.status === "failed" || r.status === "limit_reached") {
@@ -263,6 +264,58 @@ async function refreshRun(id) {
       }
     }
   } catch (_) { /* geçici hataları yut */ }
+}
+
+// Skor grafiği: jenerasyon başına en iyi skoru basit SVG ile çizer.
+// Bağımlılık yok; hedef: ilerlemeyi bir bakışta görünür kılmak.
+function renderScoreChart(cands) {
+  const box = $("scoreChart");
+  if (!cands.length) { box.innerHTML = ""; return; }
+  const byGen = new Map();
+  for (const c of cands) {
+    const g = c.generation;
+    byGen.set(g, Math.max(byGen.get(g) ?? 0, Number(c.score) || 0));
+  }
+  const gens = [...byGen.keys()].sort((a, b) => a - b);
+  const pts = gens.map((g) => ({ g, s: byGen.get(g) }));
+  const W = 640, H = 160, PAD = 28;
+  const x = (i) => PAD + (pts.length === 1 ? 0 : (i * (W - 2 * PAD)) / (pts.length - 1));
+  const y = (s) => H - PAD - (Math.max(0, Math.min(100, s)) / 100) * (H - 2 * PAD);
+  const line = pts.map((p, i) => `${x(i)},${y(p.s)}`).join(" ");
+  const dots = pts
+    .map((p, i) => `<circle cx="${x(i)}" cy="${y(p.s)}" r="4" fill="${p.s >= 100 ? "#3fb950" : "#d29922"}"><title>jen ${p.g}: ${p.s.toFixed(1)}</title></circle>`)
+    .join("");
+  const labels = pts
+    .map((p, i) => `<text x="${x(i)}" y="${H - 8}" text-anchor="middle" fill="#8b949e" font-size="10">j${p.g}</text>`)
+    .join("");
+  box.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Jenerasyon başına en iyi skor">
+      <line x1="${PAD}" y1="${y(100)}" x2="${W - PAD}" y2="${y(100)}" stroke="#30363d" stroke-dasharray="4 4" />
+      <line x1="${PAD}" y1="${y(0)}" x2="${W - PAD}" y2="${y(0)}" stroke="#30363d" />
+      <polyline points="${line}" fill="none" stroke="#58a6ff" stroke-width="2" />
+      ${dots}${labels}
+    </svg>
+    <div class="muted">En iyi skor: jenerasyon 0 → ${pts.length - 1} arası (100 = tüm testler geçti)</div>`;
+}
+
+async function loadRuns() {
+  try {
+    const runs = await api.get("/api/runs?limit=20");
+    const tb = document.querySelector("#runsTable tbody");
+    tb.innerHTML = "";
+    for (const r of runs) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td class="mono">${esc(fmtTime(r.created_at))}</td>
+        <td>${esc(r.problem_title)} <span class="muted mono">${esc(r.problem_id)}</span></td>
+        <td>${esc(r.workload)}</td>
+        <td><span class="tag ${r.status === "completed" ? "good" : r.status === "failed" ? "bad" : ""}">${esc(STATUS_TR[r.status] || r.status)}</span></td>
+        <td><b>${Number(r.best_score).toFixed(1)}</b></td>`;
+      tr.title = "Bu çalışmanın sonuçlarını yükle";
+      tr.addEventListener("click", () => openRun(r.id));
+      tb.appendChild(tr);
+    }
+  } catch (_) {}
 }
 
 function esc(v) {
@@ -292,6 +345,7 @@ async function refreshCandidates(id) {
       tr.addEventListener("click", () => toggleCandidateDetail(tr, c));
       tb.appendChild(tr);
     }
+    renderScoreChart(list);
     await refreshAgent(id);
   } catch (_) {}
 }
@@ -341,6 +395,7 @@ async function control(action) {
   $("cancelBtn").addEventListener("click", () => control("cancel"));
   await loadStatus();
   await loadMetrics();
+  await loadRuns();
   try { await loadProblems(); } catch (e) { showAlert("Problem listesi yüklenemedi: " + e.message); }
   setInterval(loadStatus, 10000);
 })();

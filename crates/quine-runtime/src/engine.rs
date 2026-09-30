@@ -1465,7 +1465,7 @@ pub fn version_string() -> String {
 mod tests {
     use super::*;
     use quine_bench_simple::SimpleBenchmark;
-    use quine_llm::ScriptedBackend;
+    use quine_llm::{LlmRequest, LlmResponse, ScriptedBackend};
 
     fn ctx() -> RuntimeContext {
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -1587,6 +1587,81 @@ mod tests {
         assert!(
             engine.start(r).is_err(),
             "geçersiz sandbox fail-closed olmalı"
+        );
+    }
+
+    /// Üretim yolunun eşzamanlılık ölçüm backend'i: kaç LLM çağrısının AYNI
+    /// ANDA uçuşta olduğunu izler. Gerçek paralellik kanıtı için kullanılır.
+    struct ConcurrencyProbe {
+        in_flight: std::sync::atomic::AtomicUsize,
+        max_in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ConcurrencyProbe {
+        fn new() -> Self {
+            Self {
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn peak(&self) -> usize {
+            self.max_in_flight.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl LlmBackend for ConcurrencyProbe {
+        fn name(&self) -> &str {
+            "concurrency-probe"
+        }
+        fn generate<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<LlmResponse>> + Send + 'a>>
+        {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, SeqCst);
+            Box::pin(async move {
+                // Model gecikmesini taklit et: eşzamanlı yürütme yoksa tepe değer 1 kalır.
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                self.in_flight.fetch_sub(1, SeqCst);
+                Ok(LlmResponse {
+                    content: "```rust\npub fn fibonacci(n: u32) -> u64 {\n    let (mut a, mut b) = (0u64, 1u64);\n    for _ in 0..n { let t = a + b; a = b; b = t; }\n    a\n}\n```".into(),
+                    model: "probe".into(),
+                    duration_ns: None,
+                })
+            })
+        }
+        fn health_check(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn population_runs_candidates_in_parallel() {
+        let c = ctx();
+        let engine = RunEngine::new(c);
+        let problem = SimpleBenchmark::problem("fib-001").unwrap();
+        let probe = Arc::new(ConcurrencyProbe::new());
+        let backend: Arc<dyn LlmBackend> = probe.clone();
+        let mut cfg = local_config(RunMode::Population);
+        cfg.population_size = 4;
+        cfg.limits.max_generations = 1;
+        let r = RunRequest {
+            problem,
+            workload: WorkloadKind::Demo,
+            config: cfg,
+            backend: Some(backend),
+        };
+        let handle = engine.start(r).unwrap();
+        let _ = handle.wait().await;
+        assert!(
+            probe.peak() >= 2,
+            "popülasyon adayları paralel üretilmeli; tepe eşzamanlılık = {}",
+            probe.peak()
         );
     }
 
