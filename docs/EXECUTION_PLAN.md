@@ -47,9 +47,9 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 | **A2** | Doğrulama | `quine-common`, `quine-llm` | Hatasız | ✅ |
 | **A3** | Doğrulama | `quine-bench-simple`, `quine-guardian` | Hatasız | ✅ |
 | **A4** | Doğrulama | `quine-eval`, `quine-evolution` | Hatasız | ✅ |
-| **A5** | CLI | `quine-cli` derleme + `--help` | 8 komut listelenir | ✅ |
+| **A5** | CLI | `quine-cli` derleme + `--help` | 11 komut listelenir | ✅ |
 | **A6** | Kalite | `cargo fmt` + `clippy -D warnings` | Temiz | ✅ |
-| **A7** | Test | `cargo test --workspace` | 33 test geçer | ✅ |
+| **A7** | Test | `cargo test --workspace` | 108 test geçer | ✅ |
 | **A8** | E2E (sim) | `--simulate` ile Faz 1-4 | Tüm komutlar çalışır | ✅ |
 | **A9** | E2E (LLM) | Ollama `qwen2.5-coder:1.5b` | `test-llm` + `run-once` çalışır | ✅ |
 | **A10** | Dosyalar | `docker-compose.yml`, `Dockerfile`, `scripts/setup-dev.sh` | `docker compose config` geçer | ✅ |
@@ -192,6 +192,12 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 - [x] `QUINE_SANDBOX=docker` ile uçtan uca değerlendirme testi. (B4)
 - [x] Çok-ajanlı gerçek LLM senaryosu (`population evolve`) + fitness ölçümü. (B5)
 - [x] Daha büyük model (`qwen2.5-coder:7b`) ile karşılaştırmalı benchmark.
+- [x] Faz 5: kalıcı çalıştırma + canlı web paneli + duraklat/devam/iptal.
+- [x] Platform: Windows derleme desteği (`x86_64-pc-windows-gnu` clippy temiz).
+- [ ] **Hatalı kodu doğrudan düzelten döngü** (derleyici çıktısını koda geri
+      besle) — küçük modellerde yakınsamayı hızlandırır.
+- [ ] **Nedensel fitness** — mutasyonun katkısını ölç (A/B karşılaştırma).
+- [ ] CI matrisine Windows işi ekle (`windows-latest`).
 
 ---
 
@@ -200,13 +206,17 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 | Katman | Test sayısı | Durum |
 |--------|:-----------:|:-----:|
 | `quine-common` | 7 | ✅ |
-| `quine-llm` | 10 | ✅ |
+| `quine-llm` | 16 | ✅ |
 | `quine-guardian` | 8 | ✅ |
-| `quine-eval` | 14 | ✅ |
+| `quine-eval` | 17 | ✅ |
 | `quine-evolution` | 13 | ✅ |
 | `quine-bench-simple` | 6 | ✅ |
+| `quine-storage` | 8 | ✅ |
+| `quine-runtime` | 13 | ✅ |
+| `quine-web` | 8 | ✅ |
 | `integration` (quine-cli) | 7 (+1 docker opt-in) | ✅ |
-| **Toplam** | **65** | ✅ |
+| `cli_serve` (gerçek ikili E2E) | 5 | ✅ |
+| **Toplam** | **108** | ✅ |
 
 ---
 
@@ -266,19 +276,54 @@ model kapasitesi. `7b` dış problemleri ilk iterasyonda çözüyor.
 
 ---
 
+## 🟣 Faz 5 Tamamlandı — Kalıcı Çalıştırma + Web Kontrol Düzlemi
+
+- **Adım 5.1** `quine-runtime`: kalıcı çalıştırma motoru. `RunRequest` →
+  `RunEngine`; her adım `RunEvent` olarak akıtılır, `quine-storage` (SQLite) ile
+  çalışma/aday/ölçüm kayıtları kalıcıdır.
+- **Adım 5.2** `quine-web`: axum tabanlı HTTP API + SSE canlı akışı + gömülü
+  (vanilla JS) dashboard. Uçlar: çalıştırma başlat/durum/olaylar, duraklat,
+  devam, iptal, geçmiş, adaylar.
+- **Adım 5.3 (sertleştirme)** Yalnızca `127.0.0.1`'e bağlanır (başka adres
+  açıkça istenirse uyarı verir). Fail-closed sandbox, gövde boyutu limiti
+  (`256 KiB`), model adı doğrulaması, güvenlik başlıkları (CSP/`nosniff`/`DENY`),
+  eşzamanlı run limiti (`4`, doluysa `429`).
+- **Adım 5.4 (düzeltme)** Duraklat/devam/iptal artık **run durumuna ve zaman
+  çizelgesine yansır** (`RUN_PAUSED`/`RUN_RESUMED`/`RUN_CANCELLING`/
+  `RUN_CANCELLED`). Aksi halde kullanıcı panelde donmuş bir ajan görüyordu.
+- **Adım 5.5** Demo modu (`serve --demo`, `--simulate`): LLM **ve** Docker
+  gerektirmez; `ScriptedBackend` yapay gecikmeyle çalışır ki adımlar gözle
+  görülsün, duraklat/iptal anlamlı olsun.
+- **Adım 5.6 (platform)** Windows derleme hatası giderildi: Unix'e özel izin
+  API'leri `#[cfg(unix)]` altına alındı; Docker mount yolu Windows biçimine
+  çevrilir; tarayıcı açma Windows/macOS/Linux'ta çalışır. `x86_64-pc-windows-gnu`
+  hedefinde `clippy -D warnings` temiz.
+
+**Kabul kriteri:** `cargo run --bin quine -- serve --demo` tek komutla paneli
+açar; "Çalıştır" ile bir çalışma canlı akar ve `completed` olur; duraklat/devam/
+iptal panelde görünür. `cli_serve` testleri bunu gerçek ikili üzerinde doğrular.
+
+---
+
 ## 🏁 Gerçek Kullanım Hazırlığı (dürüst değerlendirme)
 
 **Hazır olanlar**
-- 5 fazın tümü kod olarak mevcut; 65 test + clippy temiz, CI'da 4 iş akışı.
+- 5 fazın tümü kod olarak mevcut; **108 test** + `fmt`/`clippy` temiz, CI'da iş akışları.
 - Faz 1/2/3/4 uçtan uca **gerçek LLM + Docker** ile doğrulandı.
+- Faz 5: canlı web paneli (SSE), duraklat/devam/iptal, SQLite kalıcılığı; demo
+  modu LLM/Docker olmadan çalışır.
+- **Platform:** Linux **ve** Windows'ta derlenir (`x86_64-pc-windows-gnu`
+  hedefinde `clippy -D warnings` temiz).
 - Güvenlik: `--network none`, RAM/CPU/PID limiti, `:ro` mount, 60s timeout,
   guardian (kritik ihlalde yazmaz), audit log, docker yoksa fail-closed.
 
 **Bilinen sınırlar (dürüstçe)**
-1. **Tek LLM çağrısı ile çözüm** — `evolve_step` her iterasyonda sıfırdan kod
-   üretir; öğrenilen `[ders]` kuralları yardımcı olur ama modelin kendi hatasını
-   *görüp* düzeltmesi (derleyici çıktısını geri besleme) yok. Bu, 1.5b gibi
-   küçük modellerde yakınsamayı sınırlar.
+1. **Hata geri beslemesi dolaylıdır** — başarısız derleyici çıktısı `stderr`
+   olarak özetlenip LLM'e verilir, LLM bundan tek satırlık bir `[ders]` kuralı
+   üretir ve bu kural sonraki denemenin prompt'una eklenir. Yani model hatayı
+   *doğrudan* görmüyor; bir kural süzgecinden geçmiş hâlini görüyor. Bu, 1.5b
+   gibi küçük modellerde yakınsamayı yavaşlatır. (Kod üretimi her iterasyonda
+   sıfırdan yapılır; "hatalı kodu düzelt" döngüsü yok.)
 2. **Fitness = test skoru** — kısmi ilerleme (örn. 7/8) teşvik edilir ama
    mutasyonun gerçekten nedensel katkısı ölçülmez.
 3. **Harness tip desteği** — `&str`, `String`, `bool`, tamsayı/float, `Vec<i64>`
@@ -286,7 +331,7 @@ model kapasitesi. `7b` dış problemleri ilk iterasyonda çözüyor.
 4. **Çok-ajanlı popülasyon** — arşiv ve nesil ilerlemesi çalışıyor; ancak
    eşzamanlı değerlendirme sabit problem seti üzerinde.
 
-**Sonuç:** Quine, **araştırma/deneysel kullanım** için çalışır durumda: Ollama
-ile yerel LLM bağlanır, kod üretir, sandbox'ta doğrular, guardian ile korur ve
-prompt evrimini arşivler. **Üretim/otonom** kullanım için önce (1) derleyici
-çıktısını geri besleyen döngü ve (2) nedensel fitness ölçümü eklenmelidir.
+**Sonuç:** Quine, **yerel/tek-kullanıcı** üretim kullanımı için hazır: panel tek
+komutla açılır, çalışma canlı izlenir ve yönetilir, kayıtlar kalıcıdır. Küçük
+modellerle **otonom kod üretimi** ise deneyseldir; yakınsama için (1) hatalı kodu
+doğrudan düzelten döngü ve (2) nedensel fitness ölçümü eklenmelidir.

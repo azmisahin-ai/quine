@@ -76,6 +76,25 @@ jobs:
             echo "✓ Guardian tehlikeli kodu engelledi (beklenen)."
           fi
 
+  windows:
+    name: Windows derleme (clippy --all-targets)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # `--all-targets` test kodunu da derler: Windows'ta derlenmediği için
+      # kırılan Unix'e özel kod (örn. `std::os::unix`) burada yakalanır.
+      - name: cargo clippy (Windows, testler dahil derleme)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   e2e-docker:
     name: E2E (docker sandbox izolasyonu)
     runs-on: ubuntu-latest

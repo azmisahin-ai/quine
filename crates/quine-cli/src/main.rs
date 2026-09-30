@@ -730,7 +730,32 @@ fn default_run_config(sandbox: String, model: String) -> RunConfig {
     }
 }
 
-/// `quine serve` — web kontrol düzlemi.
+/// Tarayıcıyı platforma uygun komutla açar (en iyi çaba; hata yutulur).
+///
+/// Yalnızca `xdg-open` kullanmak Linux dışında (Windows/macOS) sessizce
+/// başarısız olur ve kullanıcı "hiçbir şey açılmadı" diye kalır.
+fn open_in_browser(url: &str) {
+    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "windows") {
+        &[("cmd", &["/C", "start", ""])]
+    } else if cfg!(target_os = "macos") {
+        &[("open", &[])]
+    } else {
+        &[("xdg-open", &[])]
+    };
+    for (program, prefix) in candidates {
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(*prefix).arg(url);
+        if cmd
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
 async fn cmd_serve(host: String, port: u16, demo: bool, no_open: bool) -> Result<()> {
     // Güvenlik: varsayılan yalnızca yerel. Uzak adres açıkça istenirse uyar.
     if host != "127.0.0.1" && host != "localhost" && host != "::1" {
@@ -753,9 +778,7 @@ async fn cmd_serve(host: String, port: u16, demo: bool, no_open: bool) -> Result
         println!("   ⚡ Demo modu: LLM gerekmez (deterministik backend).");
     }
     if !no_open {
-        let url = format!("http://{addr}");
-        // Tarayıcı açma en iyi çaba; başarısız olursa sessizce devam.
-        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+        open_in_browser(&format!("http://{addr}"));
     }
 
     tokio::select! {

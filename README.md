@@ -127,6 +127,16 @@ cargo run --bin quine -- --simulate run-once
 cargo run --bin quine -- --simulate evolve --iterations 3
 ```
 
+### Windows notu
+
+Windows'ta da çalışır (`cargo run --bin quine -- serve --demo`). İki nokta:
+
+* **`local` sandbox `rustc` ister.** Üretilen kod `rustc` ile derlenir; Rust
+  kuruluysa sorun yok. Gerçek çalıştırmalar için **Docker Desktop + `docker`
+  sandbox önerilir** (izole, ağ kapalı).
+* **Panel adresi** `http://127.0.0.1:8099` — tarayıcı otomatik açılmazsa bu
+  adresi elle açın.
+
 ---
 
 ## ⚙️ Yapılandırma (Ortam Değişkenleri)

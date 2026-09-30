@@ -9,6 +9,12 @@ use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Platforma göre "boş aygıt" (çıktıyı yok say).
+#[cfg(windows)]
+const NULL_DEVICE: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_DEVICE: &str = "/dev/null";
+
 /// İşletim sisteminden boş bir port alır (sabit port çakışması olmasın).
 fn free_port() -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").expect("boş port");
@@ -17,7 +23,7 @@ fn free_port() -> u16 {
 
 fn get(url: &str) -> Option<(u16, String)> {
     let out = Command::new("curl")
-        .args(["-s", "-o", "/dev/stdout", "-w", "\\n%{http_code}", url])
+        .args(["-s", "-o", "-", "-w", "\\n%{http_code}", url])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).to_string();
@@ -32,7 +38,7 @@ fn post(url: &str, body: &str) -> Option<(u16, String)> {
         .args([
             "-s",
             "-o",
-            "/dev/stdout",
+            "-",
             "-w",
             "\\n%{http_code}",
             "-X",
@@ -123,7 +129,7 @@ fn serve_exposes_problems_and_security_headers() {
 
     // Güvenlik başlıkları HTTP yanıtında olmalı.
     let headers = Command::new("curl")
-        .args(["-s", "-D", "-", "-o", "/dev/null", &format!("{}/", s.base)])
+        .args(["-s", "-D", "-", "-o", NULL_DEVICE, &format!("{}/", s.base)])
         .output()
         .unwrap();
     let h = String::from_utf8_lossy(&headers.stdout).to_lowercase();

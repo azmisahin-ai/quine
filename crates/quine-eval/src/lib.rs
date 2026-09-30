@@ -712,7 +712,7 @@ impl DockerSandbox {
                 &tmpfs,
                 "-v",
             ])
-            .arg(format!("{}:/work:ro", dir.display()))
+            .arg(format!("{}:/work:ro", docker_host_path(&dir)))
             .arg("-w")
             .arg("/work")
             .arg(&image_ref)
@@ -765,7 +765,27 @@ impl DockerSandbox {
     }
 }
 
+/// Docker'a verilecek host yolunu üretir.
+///
+/// Windows'ta `dir.display()` ters eğik çizgi (`C:\Users\...`) verir; `docker
+/// run -v` ise ya `C:/Users/...` ya da `/c/Users/...` biçimi ister. Aksi halde
+/// mount sessizce başarısız olur ve container "main.rs yok" diye patlar.
+#[cfg(windows)]
+fn docker_host_path(dir: &Path) -> String {
+    dir.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(not(windows))]
+fn docker_host_path(dir: &Path) -> String {
+    dir.to_string_lossy().into_owned()
+}
+
 /// Container içeriğini `nobody` kullanıcısı okuyabilsin diye izinleri açar.
+///
+/// Yalnızca Unix'te anlamlıdır: Windows'ta izin modeli farklıdır ve Docker
+/// Desktop paylaşılan klasörlerde okuma iznini kendisi yönetir. Bu yüzden
+/// fonksiyon Windows'ta bilinçli olarak no-op'tur (derleme de kırılmaz).
+#[cfg(unix)]
 fn make_world_readable(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
@@ -775,6 +795,9 @@ fn make_world_readable(dir: &Path) {
         }
     }
 }
+
+#[cfg(not(unix))]
+fn make_world_readable(_dir: &Path) {}
 
 /// Bir container'ı isimle zorla kaldırır (orphan temizliği).
 fn force_kill_container(name: &str) {
