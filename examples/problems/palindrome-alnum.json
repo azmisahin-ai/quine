@@ -1,0 +1,14 @@
+{
+  "id": "ext-palindrome-alnum",
+  "title": "Harf-Sayı Palindromu",
+  "description": "s metni, yalnızca harf ve rakamlar (ASCII alfanümerik) dikkate alınıp büyük/küçük harf gözetilmeden okunduğunda palindrom ise true döndür. Harf ve rakam olmayan tüm karakterler (boşluk, noktalama, alt çizgi) yok sayılır.",
+  "function_signature": "pub fn is_palindrome(s: &str) -> bool { todo!() }",
+  "test_cases": [
+    { "input": "A man, a plan, a canal: Panama", "expected": true },
+    { "input": "race a car", "expected": false },
+    { "input": "0P", "expected": false },
+    { "input": "ab_a", "expected": true },
+    { "input": "", "expected": true },
+    { "input": ".,", "expected": true }
+  ]
+}

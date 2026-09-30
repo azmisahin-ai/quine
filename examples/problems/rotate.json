@@ -1,0 +1,14 @@
+{
+  "id": "ext-rotate",
+  "title": "Diziyi Sağa Döndür",
+  "description": "v dizisini k adım sağa döndürüp yeni bir dizi döndür. k, dizinin uzunluğundan büyük olabilir (k % len alınmalı). Boş dizi için boş dizi döndür. Girdi dizisi değiştirilmemeli.",
+  "function_signature": "pub fn rotate(v: &[i64], k: usize) -> Vec<i64> { todo!() }",
+  "test_cases": [
+    { "input": [[1, 2, 3, 4, 5], 2], "expected": [4, 5, 1, 2, 3] },
+    { "input": [[1, 2, 3], 0], "expected": [1, 2, 3] },
+    { "input": [[1, 2, 3], 3], "expected": [1, 2, 3] },
+    { "input": [[1, 2, 3], 7], "expected": [3, 1, 2] },
+    { "input": [[], 5], "expected": [] },
+    { "input": [[-1, -2], 1], "expected": [-2, -1] }
+  ]
+}

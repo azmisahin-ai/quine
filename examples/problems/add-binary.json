@@ -1,0 +1,13 @@
+{
+  "id": "ext-add-binary",
+  "title": "İkili Toplama (Taşmasız)",
+  "description": "İki ikili sayıyı (string olarak, yalnızca '0'/'1') toplayıp sonucu ikili string olarak döndür. Sonuç baştaki sıfır içermemeli; sıfır sonucu '0' olmalı. Girdi stringleri 64 bit'e sığmayabilir, bu yüzden sayıya çevirip toplamak yasak.",
+  "function_signature": "pub fn add_binary(a: &str, b: &str) -> String { todo!() }",
+  "test_cases": [
+    { "input": ["11", "1"], "expected": "100" },
+    { "input": ["1010", "1011"], "expected": "10101" },
+    { "input": ["0", "0"], "expected": "0" },
+    { "input": ["111111111111111111111111111111111111111111111111111111111111111111111111", "1"], "expected": "1000000000000000000000000000000000000000000000000000000000000000000000000" },
+    { "input": ["1", "0"], "expected": "1" }
+  ]
+}

@@ -56,13 +56,8 @@ impl<'a, B: LlmBackend + ?Sized> MutationEngine<'a, B> {
             .generate(&request)
             .await
             .context("mutasyon LLM isteği")?;
-        let rule = first_meaningful_line(&resp.content)
-            .chars()
-            .take(200)
-            .collect::<String>();
-        if rule.is_empty() {
-            anyhow::bail!("LLM boş kural döndürdü");
-        }
+        let rule = extract_rule(&resp.content)
+            .ok_or_else(|| anyhow::anyhow!("LLM geçerli bir kural döndürmedi"))?;
 
         // Taban prompt korunur; yalnızca `[ders]` satırları yönetilir
         // (yinelenen eklenmez, en fazla 8 tanesi tutulur).
@@ -126,12 +121,13 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Yanıttan anlamlı ilk satırı çıkarır.
+/// LLM'in döndürdüğü metinden tek, kısa, **düz yazı** bir kural çıkarır.
 ///
-/// Model genellikle kuralı ```` ```rust ... ``` ```` fence'ine sarar; yalnızca
-/// fence işaretlerini soymak `rust` gibi dil etiketini kural sanmaya yol açar.
-/// Bu yüzden fence satırları ve tek başına duran dil etiketleri atlanır.
-fn first_meaningful_line(raw: &str) -> String {
+/// Kod parçaları (`fn ...`, `{`, `}`, `->`, `;`), markdown fence etiketleri ve
+/// boş satırlar elenir. Küçük modeller sık sık kural yerine kod ya da uzun bir
+/// paragraf döndürür; bunlar prompt'a `[ders]` olarak eklenirse modeli daha da
+/// bozar. Geçerli bir kural bulunamazsa `None` döner (çağıran heuristiğe düşer).
+fn extract_rule(raw: &str) -> Option<String> {
     const LANG_TAGS: [&str; 8] = [
         "rust",
         "text",
@@ -142,14 +138,56 @@ fn first_meaningful_line(raw: &str) -> String {
         "plaintext",
         "json",
     ];
-    raw.lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .map(|l| l.trim_start_matches('#').trim())
-        .map(|l| l.trim_matches('`').trim())
-        .find(|l| !l.is_empty() && !LANG_TAGS.contains(&l.to_ascii_lowercase().as_str()))
-        .unwrap_or("")
-        .to_string()
+    for line in raw.lines() {
+        let l = line
+            .trim()
+            .trim_start_matches('#')
+            .trim()
+            .trim_matches('`')
+            .trim();
+        if l.is_empty() || LANG_TAGS.contains(&l.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        if looks_like_code(l) {
+            continue;
+        }
+        let rule = first_sentence(l);
+        // Gerçek bir kural en az birkaç kelimelik cümledir; `(1..=n).product()`
+        // gibi tek "kelimelik" ifadeler kural değildir.
+        if rule.chars().count() >= 10 && rule.split_whitespace().count() >= 3 {
+            return Some(rule);
+        }
+    }
+    None
+}
+
+/// Güçlü kod işaretleri taşıyan satırları ayıklar (prose kural bunları içermez).
+fn looks_like_code(l: &str) -> bool {
+    const MARKERS: [&str; 8] = ["fn ", "pub ", "impl ", "{", "}", "->", ";", "=>"];
+    MARKERS.iter().any(|m| l.contains(m))
+}
+
+/// Metnin ilk cümlesini döner; cümle yoksa kelime sınırında 160 karaktere kisar.
+/// Uzun paragrafların ortadan kesilip anlamsız kural olmasını engeller.
+fn first_sentence(l: &str) -> String {
+    // Yalnızca cümle *ortasında* kes ("bir şey. İkinci cümle"); sondaki nokta
+    // kuralın parçası olarak kalır.
+    let cut = l.find(". ").map(|i| i + 1).unwrap_or(l.len());
+    let s = l[..cut].trim();
+    if s.chars().count() <= 160 {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for word in s.split_whitespace() {
+        if out.chars().count() + word.chars().count() + 1 > 160 {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -701,18 +739,35 @@ mod tests {
     }
 
     #[test]
-    fn first_meaningful_line_skips_code_fence_language_tag() {
+    fn extract_rule_skips_fences_code_and_returns_prose() {
         // Model kuralı ```rust fence'ine sarınca eski kod "rust"u kural sanıyordu.
         assert_eq!(
-            first_meaningful_line("```rust\nNegatif n için false döndür.\n```"),
-            "Negatif n için false döndür."
+            extract_rule("```rust\nNegatif n için false döndür.\n```").as_deref(),
+            Some("Negatif n için false döndür.")
         );
         assert_eq!(
-            first_meaningful_line("```\n  Kenar durumları kontrol et.  \n```"),
-            "Kenar durumları kontrol et."
+            extract_rule("```\n  Kenar durumları kontrol et.  \n```").as_deref(),
+            Some("Kenar durumları kontrol et.")
         );
-        assert_eq!(first_meaningful_line("```rust"), "");
-        assert_eq!(first_meaningful_line(""), "");
+        // Kod satırı kural olarak kabul edilmemeli (regresyon: `[ders] fn ...`).
+        assert_eq!(
+            extract_rule("```rust\nfn factorial(n: u32) -> u64 { todo!() }\n```"),
+            None
+        );
+        assert_eq!(extract_rule("```rust"), None);
+        assert_eq!(extract_rule(""), None);
+    }
+
+    #[test]
+    fn extract_rule_truncates_long_prose_at_sentence() {
+        let long = "Rust'ta u32 ve u64 arasında doğrudan çarpma yapılamaz. Bu yüzden \
+                    her ara sonucu u64'e çevir ve fold ile çarp.";
+        let rule = extract_rule(long).unwrap();
+        assert_eq!(
+            rule,
+            "Rust'ta u32 ve u64 arasında doğrudan çarpma yapılamaz."
+        );
+        assert!(rule.chars().count() <= 160);
     }
 
     fn temp_target(name: &str, content: &str) -> std::path::PathBuf {
