@@ -495,6 +495,111 @@ pub async fn evaluate_population(
     out
 }
 
+/// Kod mutasyonu (Faz 4 / Adım 4.3) — kod üretimiyle ilgili hatalar.
+#[derive(Debug, thiserror::Error)]
+pub enum CodeMutationError {
+    #[error("LLM yanıtında uygulanabilir kod bulunamadı")]
+    NoCode,
+    #[error("guardian reddetti: {0}")]
+    Guardian(String),
+}
+
+/// LLM'in ürettiği **kaynak kod değişikliği**ni guardian'dan geçirip diske
+/// uygulayan motor.
+///
+/// Akış (güvenlik önce, yazma sonra):
+/// 1. LLM'den yalnızca dosyanın **tam yeni içeriğini** üretmesi istenir.
+/// 2. İçerik [`DiffAnalyzer`] ile taranır; kritik ihlal varsa **hiçbir şey
+///    yazılmaz** ve [`CodeMutationError::Guardian`] döner.
+/// 3. Yalnızca temiz içerik atomik olarak hedef dosyaya yazılır; eski içerik
+///    `.<ad>.bak` yedeğine alınır.
+pub struct CodeMutator<'a, B: LlmBackend + ?Sized> {
+    llm: &'a B,
+    analyzer: quine_guardian::DiffAnalyzer,
+}
+
+impl<'a, B: LlmBackend + ?Sized> CodeMutator<'a, B> {
+    pub fn new(llm: &'a B) -> Self {
+        Self {
+            llm,
+            analyzer: quine_guardian::DiffAnalyzer::default(),
+        }
+    }
+
+    /// Guardian'ı özel kurallarla değiştir (test enjeksiyonu için).
+    pub fn with_analyzer(mut self, analyzer: quine_guardian::DiffAnalyzer) -> Self {
+        self.analyzer = analyzer;
+        self
+    }
+
+    /// `instruction` doğrultusunda hedef dosyanın yeni içeriğini üretir.
+    pub async fn propose(
+        &self,
+        model: &str,
+        path: &std::path::Path,
+        instruction: &str,
+    ) -> Result<String> {
+        let current = std::fs::read_to_string(path)
+            .with_context(|| format!("hedef dosya okunamadı: {}", path.display()))?;
+        let system = "Sen bir Rust kaynak-kod mutasyon ajanısın. Yalnızca istenen dosyanın TAM \
+                      yeni içeriğini tek bir ```rust kod bloğu içinde üret. Açıklama yazma.";
+        let prompt = format!(
+            "Dosya: {}\n\nMevcut içerik:\n```rust\n{current}\n```\n\nİstenen değişiklik:\n{instruction}",
+            path.display()
+        );
+        let resp = self
+            .llm
+            .generate(&LlmRequest::new(model, system, prompt))
+            .await
+            .context("kod mutasyonu isteği")?;
+        let code = resp.extract_code();
+        if code.trim().is_empty() {
+            return Err(CodeMutationError::NoCode.into());
+        }
+        Ok(code)
+    }
+
+    /// Öneriyi değerlendirir ve temizse uygular; dönen değer hedef dosyadır.
+    ///
+    /// `Ok(path)` → mutasyon uygulandı; `Err(Guardian)` → engellendi (dosya
+    /// değişmedi). Diğer hatalar LLM/IO kaynaklıdır.
+    pub async fn apply(
+        &self,
+        model: &str,
+        path: &std::path::Path,
+        instruction: &str,
+    ) -> Result<std::path::PathBuf> {
+        let code = self.propose(model, path, instruction).await?;
+        self.analyzer
+            .analyze(&code)
+            .map_err(|v| CodeMutationError::Guardian(v.to_string()))?;
+        self.write_atomic(path, &code)
+            .with_context(|| format!("mutasyon yazılamadı: {}", path.display()))?;
+        Ok(path.to_path_buf())
+    }
+
+    /// Yedeği alıp dosyayı geçici bir ada yazdıktan sonra yerine taşır.
+    fn write_atomic(&self, path: &std::path::Path, content: &str) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let backup = path.with_extension(format!(
+            "{}bak",
+            path.extension()
+                .map(|e| format!("{}.", e.to_string_lossy()))
+                .unwrap_or_default()
+        ));
+        if path.exists() {
+            std::fs::copy(path, &backup)
+                .with_context(|| format!("yedek alınamadı: {}", backup.display()))?;
+        }
+        let tmp = path.with_extension("quine-tmp");
+        std::fs::write(&tmp, content)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,6 +713,59 @@ mod tests {
         );
         assert_eq!(first_meaningful_line("```rust"), "");
         assert_eq!(first_meaningful_line(""), "");
+    }
+
+    fn temp_target(name: &str, content: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("quine-codemut-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn code_mutator_applies_clean_change_atomically() {
+        let path = temp_target("tool.rs", "pub fn greet() -> &'static str { \"v1\" }\n");
+        let llm =
+            quine_llm::EchoBackend::new("```rust\npub fn greet() -> &'static str { \"v2\" }\n```");
+        let mutator = CodeMutator::new(&llm);
+        mutator
+            .apply("echo", &path, "selamlamayı v2 yap")
+            .await
+            .expect("temiz mutasyon uygulanmalı");
+
+        let updated = std::fs::read_to_string(&path).unwrap();
+        assert!(updated.contains("v2"));
+        let backup = path.with_extension("rs.bak");
+        assert!(backup.exists(), "eski içerik yedeklenmeli");
+        assert!(std::fs::read_to_string(&backup).unwrap().contains("v1"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn code_mutator_blocks_destructive_change_and_leaves_file_intact() {
+        // Faz 4 kabul kriteri: `rm -rf /` içeren üretim engellenmeli ve dosya
+        // dokunulmadan kalmalı.
+        let original = "pub fn safe() -> u32 { 1 }\n";
+        let path = temp_target("evil.rs", original);
+        let llm = quine_llm::EchoBackend::new(
+            "```rust\nfn main() { std::process::Command::new(\"sh\").arg(\"-c\").arg(\"rm -rf /\").status().unwrap(); }\n```",
+        );
+        let mutator = CodeMutator::new(&llm);
+        let err = mutator
+            .apply("echo", &path, "kötü niyetli")
+            .await
+            .expect_err("guardian engellemeli");
+        assert!(matches!(
+            err.downcast_ref::<CodeMutationError>(),
+            Some(CodeMutationError::Guardian(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(
+            !path.with_extension("rs.bak").exists(),
+            "engellenince yedek de oluşmamalı"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[tokio::test]

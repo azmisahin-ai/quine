@@ -11,6 +11,7 @@ description = "Quine: popülasyon, seçilim ve mutasyon motoru (Faz 2-3)"
 quine-common.workspace = true
 quine-llm.workspace = true
 quine-eval.workspace = true
+quine-guardian.workspace = true
 quine-bench-simple.workspace = true
 serde.workspace = true
 serde_json.workspace = true

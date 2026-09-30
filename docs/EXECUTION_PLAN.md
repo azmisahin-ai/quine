@@ -235,3 +235,18 @@ model kapasitesi. `7b` dış problemleri ilk iterasyonda çözüyor.
 4. **Çok argümanlı fonksiyonlar hiç çalışmıyordu** — harness tek girdi
    satırını tek değer sanıyordu (`gcd(a, b)` panikliyordu). Harness artık
    test girdilerini tipli Rust literal'leri olarak üretiyor.
+
+## 🟣 Faz 4 Tamamlandı — CodeMutation + Guardian
+
+- **Adım 4.1** `DiffAnalyzer` (mevcut): `unsafe`, `remove_dir_all`,
+  `process::Command`, `rm -rf`, ağ ve env desenlerini tarar; kritik ihlal →
+  `SecurityViolation`.
+- **Adım 4.2** `DockerSandbox`: `--network none`, `--memory`/`--cpus` limiti,
+  `:ro` mount, `timeout` ile izolasyon.
+- **Adım 4.3 (yeni)** `quine-evolution::CodeMutator`: LLM'in önerdiği tam dosya
+  içeriğini önce guardian'dan geçirir; temizse yedeği alıp **atomik** yazar,
+  kritik ihlalde **hiç yazmaz**. CLI: `quine mutate <dosya> --instruction "..."
+  [--dry-run]`. Her karar `data/audit.log`'a işlenir.
+- **Kabul kriteri:** `rm -rf /` içeren üretim `guard check` ve `mutate`
+  yollarında engelleniyor; `data/audit.log`'a `blocked` kaydı düşüyor.
+  Uçtan uca test: `integration::code_mutation_is_applied_and_guarded`.

@@ -101,15 +101,19 @@ Yeni problem eklerken `quine-bench-simple` içinde hem çözücü stub'ı hem
 
 ## Mimari Sınırlar (önemli — yanlış varsayıma düşme)
 
-- **"Öz-değişiklik" = prompt mutasyonu, kaynak kod değil.** Faz 2 (`evolve`)
-  ajanın `system_prompt`'unu günceller. **Kaynak kodunu değiştirme (CodeMutation,
-  Faz 4) henüz YAZILMADI.** `MASTER_PLAN.md` Faz 4'te planlı.
+- **İki mutasyon katmanı var.** Faz 2 (`evolve`) yalnızca ajanın
+  `system_prompt`'unu günceller. Faz 4 (`mutate`, `quine-evolution::CodeMutator`)
+  ise **gerçek kaynak kodunu** değiştirir: LLM'in önerdiği tam dosya içeriği
+  önce `DiffAnalyzer`'dan geçer, kritik ihlalde **hiç yazılmaz**; temizse
+  yedek alınıp atomik yazılır ve karar `data/audit.log`'a işlenir.
 - **Problem seti artık gömülü değil.** Harness `function_signature` stub'ından
   türetilir (`quine-eval::parse_signature`); `run-once/evolve --problem-file x.json`
   ile dış problem verilebilir. Beklenen çıktılar `test_cases`'ten gelir.
-- **Harness std-only derlenir** (düz `rustc`, harici crate yok) → JSON elle
-  çözülür. Desteklenen tipler `arg_expr`/`out_expr` içinde listeli; yeni tip
-  gerekirse ikisine de ekle. Desteklenmeyen tip → net hata (sessiz geçmez).
+- **Harness std-only derlenir** (düz `rustc`, harici crate yok). Test girdileri
+  harness'e **tipli Rust literal'i** olarak gömülür (`arg_literal`); çok
+  argümanlı fonksiyonda girdi `[a, b]` dizisidir. Desteklenen tipler
+  `arg_literal`/`out_expr` içinde listeli; yeni tip gerekirse ikisine de ekle.
+  Desteklenmeyen tip → net hata (sessiz geçmez).
 - **`data/config.json` runtime'da okunur**; öncelik: env > config > varsayılan.
 - **Evrim yakınsamıyorsa önce model kapasitesini sorgula.** 1.5b, `u32→u64
   product` gibi tip hatalarını düzeltemiyor; bu framework değil model sınırı.
@@ -120,4 +124,6 @@ Yeni problem eklerken `quine-bench-simple` içinde hem çözücü stub'ı hem
 `docs/EXECUTION_PLAN.md` → "Sonraki Faz" bölümüne bak. B0–B7 tamamlandı
 (git temizliği, CI, `extract_code`, entegrasyon testleri, docker E2E, evrim
 ölçümü, config runtime, dış problem desteği, evrim prompt kalitesi).
-Açık: daha büyük model (`7b`) ile karşılaştırma; **Faz 4 CodeMutation**.
+Ayrıca tamamlandı: 7b/1.5b karşılaştırması; elitist evrim + başarısız-test
+teşhisi + çok argümanlı harness düzeltmeleri; **Faz 4 CodeMutation** (`mutate`)
+ve guardian kabul kriteri (rm -rf engeli + audit kaydı).

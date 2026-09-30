@@ -735,6 +735,7 @@ dependencies = [
  "quine-bench-simple",
  "quine-common",
  "quine-eval",
+ "quine-guardian",
  "quine-llm",
  "rand",
  "serde",

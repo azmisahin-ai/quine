@@ -4,7 +4,7 @@
 //! Faz 1: `run-once`
 //! Faz 2: `evolve`
 //! Faz 3: `population evolve`
-//! Faz 4: `guard check`
+//! Faz 4: `guard check`, `mutate`
 //!
 //! Simülasyon modu (`--simulate`) Ollama gerektirmeden tüm döngüyü
 //! deterministik EchoBackend ile çalıştırır (CI ve ilk deneme için).
@@ -13,7 +13,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use quine_common::{Agent, EvaluationResult};
 use quine_eval::Evaluator;
-use quine_evolution::{evaluate_population, evolve_step, Archive, ArchiveEntry, PopulationManager};
+use quine_evolution::{
+    evaluate_population, evolve_step, Archive, ArchiveEntry, CodeMutationError, CodeMutator,
+    PopulationManager,
+};
 use quine_guardian::{AuditDecision, AuditLog, DiffAnalyzer};
 use quine_llm::{LlmBackend, LlmRequest, OllamaBackend};
 use std::path::PathBuf;
@@ -70,6 +73,17 @@ enum Commands {
     Guard {
         #[command(subcommand)]
         cmd: GuardCommands,
+    },
+    /// Gerçek kaynak-kod mutasyonu: LLM önerisi guardian'dan geçerse uygulanır (Faz 4)
+    Mutate {
+        /// Mutasyona uğratılacak kaynak dosya
+        file: PathBuf,
+        /// LLM'e verilecek değişiklik talimatı
+        #[arg(long)]
+        instruction: String,
+        /// Kuru çalıştırma: üret ve tara, ama diske yazma
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -243,6 +257,11 @@ async fn main() -> Result<()> {
         }
         Commands::Population(PopulationCommands::Show) => cmd_population_show(),
         Commands::Guard { cmd } => cmd_guard(cmd),
+        Commands::Mutate {
+            file,
+            instruction,
+            dry_run,
+        } => cmd_mutate(cli.simulate, &file, &instruction, dry_run).await,
     }
 }
 
@@ -519,6 +538,63 @@ fn cmd_population_show() -> Result<()> {
 // ---------------------------------------------------------------------------
 // Faz 4
 // ---------------------------------------------------------------------------
+
+async fn cmd_mutate(
+    simulate: bool,
+    file: &std::path::Path,
+    instruction: &str,
+    dry_run: bool,
+) -> Result<()> {
+    if !file.exists() {
+        anyhow::bail!("hedef dosya yok: {}", file.display());
+    }
+    let backend = backend_from_flags(simulate);
+    let model = model_name(simulate);
+    let mutator = CodeMutator::new(backend.as_ref());
+
+    if dry_run {
+        // Öneriyi üret ve guardian taramasından geçir; diske dokunma.
+        let code = mutator.propose(&model, file, instruction).await?;
+        match DiffAnalyzer::default().analyze(&code) {
+            Ok(()) => {
+                println!("✅ Öneri guardian'dan geçti (kuru çalıştırma, yazılmadı).");
+                println!("{}", indent(&code));
+            }
+            Err(v) => {
+                println!("🚫 Öneri engellendi: {v}");
+                AuditLog::default_location().record(
+                    AuditDecision::Blocked,
+                    None,
+                    &format!("mutate --dry-run {}: {v}", file.display()),
+                )?;
+                return Err(v.into());
+            }
+        }
+        return Ok(());
+    }
+
+    match mutator.apply(&model, file, instruction).await {
+        Ok(path) => {
+            AuditLog::default_location().record(
+                AuditDecision::Allowed,
+                None,
+                &format!("mutate {}: {}", path.display(), instruction),
+            )?;
+            println!("✅ Mutasyon uygulandı: {}", path.display());
+            Ok(())
+        }
+        Err(e) => {
+            let detail = format!("mutate {}: {e}", file.display());
+            if matches!(
+                e.downcast_ref::<CodeMutationError>(),
+                Some(CodeMutationError::Guardian(_))
+            ) {
+                AuditLog::default_location().record(AuditDecision::Blocked, None, &detail)?;
+            }
+            Err(e)
+        }
+    }
+}
 
 fn cmd_guard(cmd: GuardCommands) -> Result<()> {
     let GuardCommands::Check { file } = cmd;

@@ -83,6 +83,7 @@ cargo run --bin quine -- run-once --problem fib-001   # tek problem (Faz 1)
 cargo run --bin quine -- evolve --iterations 5        # prompt evrimi (Faz 2)
 cargo run --bin quine -- population evolve --generations 10   # popülasyon (Faz 3)
 cargo run --bin quine -- guard check dosya.rs         # güvenlik taraması (Faz 4)
+cargo run --bin quine -- mutate dosya.rs --instruction "..."   # kod mutasyonu (Faz 4)
 ```
 
 ### 3. LLM'siz (simülasyon) mod

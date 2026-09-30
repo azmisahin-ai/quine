@@ -188,3 +188,55 @@ async fn docker_sandbox_evaluates_in_isolation() {
     assert!(result.success, "stderr: {}", result.stderr);
     assert_eq!(result.score, 100.0);
 }
+
+/// Faz 4 / Adım 4.3: `CodeMutator` gerçek bir dosyayı değiştirir, yedeği alır;
+/// guardian kritik ihlalde ise dosyayı **dokunmadan** bırakır ve engeli
+/// `data/audit.log`'a yazar.
+#[tokio::test]
+async fn code_mutation_is_applied_and_guarded() {
+    use quine_evolution::{CodeMutationError, CodeMutator};
+    use quine_guardian::{AuditDecision, AuditLog};
+
+    let dir = std::env::temp_dir().join(format!("quine-mut-it-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("custom_tool.rs");
+    let original = "pub fn placeholder() -> u32 { 0 }\n";
+    std::fs::write(&target, original).unwrap();
+    let audit_path = dir.join("audit.log");
+
+    // 1) Temiz mutasyon uygulanır.
+    let clean = EchoBackend::fibonacci_solver();
+    CodeMutator::new(&clean)
+        .apply("echo", &target, "fibonacci ekle")
+        .await
+        .expect("temiz mutasyon uygulanmalı");
+    assert!(std::fs::read_to_string(&target)
+        .unwrap()
+        .contains("fibonacci"));
+    assert!(target.with_extension("rs.bak").exists(), "yedek alınmalı");
+
+    // 2) Tehlikeli mutasyon engellenir; dosya korunur.
+    let before = std::fs::read_to_string(&target).unwrap();
+    let evil = EchoBackend::new(
+        "```rust\nfn main() { std::process::Command::new(\"sh\").arg(\"-c\").arg(\"rm -rf /\").status().unwrap(); }\n```",
+    );
+    let err = CodeMutator::new(&evil)
+        .apply("echo", &target, "kötü niyetli")
+        .await
+        .expect_err("guardian engellemeli");
+    assert!(matches!(
+        err.downcast_ref::<CodeMutationError>(),
+        Some(CodeMutationError::Guardian(_))
+    ));
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), before);
+
+    // 3) Engellenen eylem denetim kaydına yazılabilir (Faz 4 kabul kriteri).
+    AuditLog::new(&audit_path)
+        .record(AuditDecision::Blocked, None, &err.to_string())
+        .unwrap();
+    let logged = std::fs::read_to_string(&audit_path).unwrap();
+    assert!(logged.contains("blocked"));
+    assert!(logged.contains("SecurityViolation"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
