@@ -155,8 +155,15 @@ ve guardian kabul kriteri (rm -rf engeli + audit kaydı).
   olması, geçersiz girdilerin `400` ile reddi.
 
 **Kullanıcı için tek komut:** `cargo run --bin quine -- serve --demo`
+(panel: `http://127.0.0.1:8080`, mod varsayılanı `evrim` — hatalardan öğrenme
+döngüsü görünür olsun diye). Demo modu sandbox'ı `local`'e sabitler; panel
+`docker` seçili gelse bile Docker kurulu olmasa da çalışır.
+
+**Platform:** Linux ve Windows'ta derlenir. Windows'a özgü kırılmalar (Unix
+izin API'leri, `docker -v` yol biçimi, `xdg-open`) giderildi; CI'da
+`windows-latest` işi `clippy --all-targets` ile korur.
 
 **Bilinen sınır:** bu ortamdan `git push` yapılamıyor — GitHub token'ı
 `azmisahin` kullanıcısına ait ve `azmisahin-ai/quine` deposuna yazma yetkisi
-yok (403). Commit yerelde `main` üzerinde; push kullanıcı tarafından
+yok (403). Commit'ler yerelde `main` üzerinde; push kullanıcı tarafından
 yapılmalı.
