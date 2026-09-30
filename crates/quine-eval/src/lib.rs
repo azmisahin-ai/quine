@@ -554,17 +554,19 @@ fn json_quote(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Docker sandbox (Faz 4 hedefi — arayüz hazır, yerel fallback ile çalışır)
+// Docker sandbox (Faz 4 — tam izolasyon, sessiz yerel fallback yok)
 // ---------------------------------------------------------------------------
 
-/// Faz 4: `docker run --network none --memory ... --cpus ...` ile tam izolasyon.
-/// Docker bulunamazsa [`LocalProcessSandbox`]’a düşer.
+/// Faz 4: `docker run --network none --memory ... --cpus ... --pids-limit ...`
+/// ile tam izolasyon. Docker bulunamazsa **hata verir** (sessizce yerel sandbox'a
+/// düşmez; bkz. [`sandbox_from_kind`]).
 #[derive(Debug, Clone)]
 pub struct DockerSandbox {
     pub image: String,
     pub limits: SandboxLimits,
     pub cpus: String,
     pub memory: String,
+    pub pids_limit: u32,
 }
 
 impl Default for DockerSandbox {
@@ -574,6 +576,7 @@ impl Default for DockerSandbox {
             limits: SandboxLimits::default(),
             cpus: "1.0".into(),
             memory: "512m".into(),
+            pids_limit: 256,
         }
     }
 }
@@ -636,6 +639,10 @@ impl DockerSandbox {
                 &self.memory,
                 "--cpus",
                 &self.cpus,
+                "--pids-limit",
+                &self.pids_limit.to_string(),
+                "--security-opt",
+                "no-new-privileges",
                 "-v",
             ])
             .arg(format!("{}:/work:ro", dir.display()))

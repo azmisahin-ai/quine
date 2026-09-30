@@ -59,34 +59,41 @@ impl<'a, B: LlmBackend + ?Sized> MutationEngine<'a, B> {
         let rule = extract_rule(&resp.content)
             .ok_or_else(|| anyhow::anyhow!("LLM geçerli bir kural döndürmedi"))?;
 
-        // Taban prompt korunur; yalnızca `[ders]` satırları yönetilir
-        // (yinelenen eklenmez, en fazla 8 tanesi tutulur).
-        let mut rules: Vec<String> = agent
-            .system_prompt
-            .lines()
-            .filter(|l| l.trim_start().starts_with("[ders]"))
-            .map(|l| l.trim().to_string())
-            .collect();
-        let new_rule = format!("[ders] {rule}");
-        if !rules.contains(&new_rule) {
-            rules.push(new_rule);
-        }
-        if rules.len() > 8 {
-            rules.drain(0..rules.len() - 8);
-        }
-        let base: String = agent
-            .system_prompt
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("[ders]"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut updated = base.trim_end().to_string();
-        if !rules.is_empty() {
-            updated.push('\n');
-            updated.push_str(&rules.join("\n"));
-        }
-        Ok(updated)
+        Ok(apply_rule(agent, &rule))
     }
+}
+
+/// Ajanın taban prompt'unu koruyarak bir `[ders]` kuralı ekler.
+///
+/// Kural yinelenmez ve en fazla 8 kural tutulur (eskiler düşer). Hem LLM'in
+/// ürettiği kural hem de heuristik yedek kural buradan geçer; böylece ikinci
+/// yol da tekrar biriktirmez.
+pub(crate) fn apply_rule(agent: &Agent, rule: &str) -> String {
+    let new_rule = format!("[ders] {}", rule.trim());
+    let mut rules: Vec<String> = agent
+        .system_prompt
+        .lines()
+        .filter(|l| l.trim_start().starts_with("[ders]"))
+        .map(|l| l.trim().to_string())
+        .collect();
+    if !rules.contains(&new_rule) {
+        rules.push(new_rule);
+    }
+    if rules.len() > 8 {
+        rules.drain(0..rules.len() - 8);
+    }
+    let base: String = agent
+        .system_prompt
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("[ders]"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut updated = base.trim_end().to_string();
+    if !rules.is_empty() {
+        updated.push('\n');
+        updated.push_str(&rules.join("\n"));
+    }
+    updated
 }
 
 fn summarize_failures(results: &[EvaluationResult]) -> String {
@@ -460,9 +467,11 @@ pub async fn evolve_step<B: LlmBackend + ?Sized>(
         Ok(prompt) => agent.mutate_prompt(prompt),
         Err(e) => {
             tracing::warn!("refine başarısız ({e:#}); heuristik mutasyon uygulanıyor");
-            agent.mutate_prompt_with_hint(
-                "[ders] Kenar durumları (0, 1, negatif, boş girdi) kontrol et.",
-            )
+            let heuristic = apply_rule(
+                agent,
+                "Kenar durumları (0, 1, negatif, boş girdi) kontrol et.",
+            );
+            agent.mutate_prompt(heuristic)
         }
     };
 
@@ -768,6 +777,20 @@ mod tests {
             "Rust'ta u32 ve u64 arasında doğrudan çarpma yapılamaz."
         );
         assert!(rule.chars().count() <= 160);
+    }
+
+    #[test]
+    fn apply_rule_does_not_duplicate_same_rule() {
+        // Heuristik yol her jenerasyonda aynı kuralı ekliyordu; tekrar etmemeli.
+        let root = Agent::new("root");
+        let p1 = apply_rule(&root, "Kenar durumları kontrol et.");
+        let agent1 = root.mutate_prompt(p1);
+        let p2 = apply_rule(&agent1, "Kenar durumları kontrol et.");
+        assert_eq!(
+            p2.lines().filter(|l| l.starts_with("[ders]")).count(),
+            1,
+            "aynı kural yinelenmemeli: {p2}"
+        );
     }
 
     fn temp_target(name: &str, content: &str) -> std::path::PathBuf {
