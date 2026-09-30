@@ -27,20 +27,23 @@ programlar kavramından ("quine") alır.
 ## 🗂️ Mimari
 
 ```text
-quine-cli ──► quine-evolution ──► quine-eval ──► quine-bench-simple
+quine-cli ──► quine-runtime ──► quine-eval ──► quine-bench-simple
    │               │                 │                │
    ├──► quine-llm  ├──► quine-guardian                │
-   │               │        │                         │
-   └───────────────┴────────┴────► quine-common ◄─────┘
+   │               ├──► quine-storage (SQLite)        │
+   └──► quine-web  └────────────► quine-common ◄──────┘
 ```
 
 | Crate | Görev |
 |-------|-------|
 | `quine-common` | Paylaşılan tipler: `Agent`, `Problem`, `TestCase`, `EvaluationResult`, `MutationStrategy` |
-| `quine-llm` | LLM soyutlaması: `LlmBackend` trait, `OllamaBackend`, `EchoBackend` |
+| `quine-llm` | LLM soyutlaması: `LlmBackend` trait, `OllamaBackend`, `EchoBackend`, `ScriptedBackend` |
 | `quine-eval` | Benchmark çalıştırıcı + Sandbox (`LocalProcessSandbox`, `DockerSandbox`) |
 | `quine-evolution` | Popülasyon, seçilim (rulet/turnuva), mutasyon, arşiv |
 | `quine-guardian` | Güvenlik: `DiffAnalyzer` + audit log |
+| `quine-runtime` | Çalıştırma motoru: run/aday yaşam döngüsü, olay veri yolu (SSE), iptal |
+| `quine-storage` | SQLite kalıcılığı: run, aday, olay, denetim kaydı, ajan genomu, metrikler |
+| `quine-web` | Web kontrol düzlemi: REST API + SSE + gömülü canlı panel (axum) |
 | `quine-cli` | Kullanıcı arayüzü (clap) |
 | `quine-bench-simple` | Benchmark problemleri: Fibonacci, String Reverse, List Sum |
 
@@ -145,7 +148,7 @@ Windows'ta da çalışır (`cargo run --bin quine -- serve --demo`). İki nokta:
 |----------|-----------|----------|
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama sunucu adresi |
 | `QUINE_MODEL` | `qwen2.5-coder:1.5b` | Kullanılacak model |
-| `QUINE_SANDBOX` | `local` | `local` \| `docker`. `docker` seçiliyken Docker erişilemezse çalışma **durur** (sessizce `local`'e düşülmez). |
+| `QUINE_SANDBOX` | `docker` | `docker` \| `local`. Varsayılan `docker`'dır. `docker` seçiliyken Docker erişilemezse çalışma **durur** (sessizce `local`'e düşülmez — fail-closed). `local` yalnızca geliştirme içindir. |
 | `QUINE_TEMPERATURE` | `0.2` | Örnekleme sıcaklığı (`0.0` = deterministik) |
 | `RUST_LOG` | `info` | Log seviyesi |
 
@@ -159,10 +162,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Mevcut durum (2026-09-30): workspace **hatasız derlenir**, **108 test geçer**
+Mevcut durum (2026-09-30): workspace **hatasız derlenir**, **117 test geçer**
 (gerçek `quine` ikilisini ayağa kaldıran uçtan uca testler dahil), `fmt` ve
-`clippy` temiz, gerçek LLM (Ollama) ile `run-once` çalışır. Ayrıntı:
-`docs/EXECUTION_PLAN.md`.
+`clippy` temiz. Uçtan uca doğrulandı:
+
+* **Gerçek LLM (Ollama) + Docker sandbox:** `quine run-once --problem rev-002`
+  gerçek modelle kodu üretti, guardian'dan geçirdi, izole Docker konteynerinde
+  derleyip çalıştırdı ve 4/4 testi geçti (skor 100).
+* **Panel (tarayıcı):** demo ve gerçek çalışmalar canlı izlendi; skor grafiği,
+  aday kodu + diff görüntüleme, kalıcı genom kartı, toplam istatistikler ve
+  çalıştırma geçmişi çalışıyor. Her çalışma **DEMO** ya da **GERÇEK** rozetiyle
+  etiketlenir.
+* **Güvenlik:** guardian'a karşı 15 saldırılık adversarial test paketi
+  (host dosya okuma/yazma, env sızıntısı, path traversal, takma adlı modül
+  içe aktarma, alt süreç, ağ erişimi) — hepsi engellenir.
+
+Ayrıntı: `docs/EXECUTION_PLAN.md`.
 
 ---
 

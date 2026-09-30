@@ -49,7 +49,7 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 | **A4** | Doğrulama | `quine-eval`, `quine-evolution` | Hatasız | ✅ |
 | **A5** | CLI | `quine-cli` derleme + `--help` | 11 komut listelenir | ✅ |
 | **A6** | Kalite | `cargo fmt` + `clippy -D warnings` | Temiz | ✅ |
-| **A7** | Test | `cargo test --workspace` | 108 test geçer | ✅ |
+| **A7** | Test | `cargo test --workspace` | 117 test geçer | ✅ |
 | **A8** | E2E (sim) | `--simulate` ile Faz 1-4 | Tüm komutlar çalışır | ✅ |
 | **A9** | E2E (LLM) | Ollama `qwen2.5-coder:1.5b` | `test-llm` + `run-once` çalışır | ✅ |
 | **A10** | Dosyalar | `docker-compose.yml`, `Dockerfile`, `scripts/setup-dev.sh` | `docker compose config` geçer | ✅ |
@@ -179,7 +179,7 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 |------|----------|-------|
 | Küçük model kod karıştırması | 1.5B model bazen kod bloğu dışına metin koyar | ✅ B2'de `extract_code` sertleştirildi; hâlâ daha büyük model (`7b`) daha iyi olur |
 | `extract_code` dayanıklılığı | Kod bloğu yoksa ham içeriği döndürür | ✅ B2: think-block temizliği + `rust` fence tercihi + fence'siz fonksiyon ayıklama |
-| Docker sandbox | Varsayılan `local`; `docker` modu izole çalışmalı | ✅ B4: `QUINE_SANDBOX=docker` ile E2E + CI job doğrulandı |
+| Docker sandbox | Varsayılan `docker`; izole çalışmalı | ✅ B4: `QUINE_SANDBOX=docker` ile E2E + CI job doğrulandı |
 | Think-block temizliği | Bazı modeller `thinking` etiketi basar | ✅ B2: `extract_code` içinde temizleniyor |
 
 ---
@@ -212,11 +212,11 @@ Bir LLM'e (veya yeni bir geliştiriciye) iş verirken:
 | `quine-evolution` | 13 | ✅ |
 | `quine-bench-simple` | 6 | ✅ |
 | `quine-storage` | 8 | ✅ |
-| `quine-runtime` | 13 | ✅ |
+| `quine-runtime` | 14 | ✅ |
 | `quine-web` | 8 | ✅ |
 | `integration` (quine-cli) | 7 (+1 docker opt-in) | ✅ |
 | `cli_serve` (gerçek ikili E2E) | 5 | ✅ |
-| **Toplam** | **108** | ✅ |
+| **Toplam** | **117** | ✅ |
 
 ---
 
@@ -257,6 +257,26 @@ model kapasitesi. `7b` dış problemleri ilk iterasyonda çözüyor.
    ayrı yerde olduğu için prompt şişiyordu. Ortak `apply_rule` ile tekrar engellendi.
 8. **Docker sandbox'ta PID limiti yoktu** — fork-bomb ana makinenin PID'lerini
    tüketebilirdi. `--pids-limit 256` + `--security-opt no-new-privileges` eklendi.
+9. **Guardian takma adlı içe aktarmayla atlatılabiliyordu** — `use std::fs as f;
+   f::write(...)` biçiminde bir takma ad `fs::` desenini atlatıyordu. Kritik
+   modüllerin (`fs`, `process`, `env`, `net`, `os`, `path`) takma adla
+   içe aktarılması yasaklandı (`aliased-module-import`).
+10. **`Path`/`PathBuf` ile sandbox dışına çıkılabiliyordu** — `PathBuf::from("/etc/shadow")`
+    gibi yol manipülasyonu engellenmiyordu. `path-module` kuralı eklendi.
+11. **`avg_score` yalnızca başarılı run'ları sayıyordu** — gerçek ilerlemeyi
+    değil, yalnızca iyi haberleri gösteriyordu. Artık tüm sonuçlanmış run'ları
+    kapsar; ayrıca `candidates_total`, `avg_candidate_score` ve `best_generation`
+    metrikleri eklendi.
+12. **Demo ve gerçek sonuçlar karıştırılabiliyordu** — panel artık her çalışmayı
+    **DEMO** (scripted backend) ya da **GERÇEK** (LLM + sandbox) rozetiyle
+    etiketler.
+
+### Adversarial saldırı paketi (P0)
+
+Guardian'a karşı 15 gerçekçi kaçış denemesi içeren `adversarial_escapes_are_blocked`
+testi eklendi: host dosya okuma/yazma, env sızıntısı, `env!` makrosu, mutlak yol,
+path traversal, alt süreç, shell yıkım, ağ erişimi, `unsafe`, FFI/libc, derleme
+zamanı host okuma, platform kaçışı, `PathBuf` ve takma adlı `fs`. **Hepsi engellenir.**
 
 ## 🟣 Faz 4 Tamamlandı — CodeMutation + Guardian
 
@@ -308,7 +328,7 @@ iptal panelde görünür. `cli_serve` testleri bunu gerçek ikili üzerinde doğ
 ## 🏁 Gerçek Kullanım Hazırlığı (dürüst değerlendirme)
 
 **Hazır olanlar**
-- 5 fazın tümü kod olarak mevcut; **108 test** + `fmt`/`clippy` temiz, CI'da iş akışları.
+- 5 fazın tümü kod olarak mevcut; **117 test** + `fmt`/`clippy` temiz, CI'da iş akışları.
 - Faz 1/2/3/4 uçtan uca **gerçek LLM + Docker** ile doğrulandı.
 - Faz 5: canlı web paneli (SSE), duraklat/devam/iptal, SQLite kalıcılığı; demo
   modu LLM/Docker olmadan çalışır.

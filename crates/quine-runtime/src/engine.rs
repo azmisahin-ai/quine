@@ -400,8 +400,14 @@ impl Emitter {
         generation: Option<u32>,
         payload: serde_json::Value,
     ) -> Result<()> {
-        self.bus
-            .emit(&self.run_id, kind, agent_id.clone(), generation, None, payload)?;
+        self.bus.emit(
+            &self.run_id,
+            kind,
+            agent_id.clone(),
+            generation,
+            None,
+            payload,
+        )?;
         Ok(())
     }
 
@@ -588,8 +594,13 @@ async fn produce_candidate(
         Some(gen),
         serde_json::json!({"duration_ms": t_g.elapsed().as_millis() as u64}),
     )?;
-    ctx.emitter
-        .audit(agent_id, AuditDecision::Allowed, None, None, "guardian geçti");
+    ctx.emitter.audit(
+        agent_id,
+        AuditDecision::Allowed,
+        None,
+        None,
+        "guardian geçti",
+    );
 
     ctx.emitter.emit(
         RunEventKind::SandboxStarted,
@@ -686,20 +697,26 @@ fn simple_diff(old: &str, new: &str) -> String {
                 j += 1;
             }
             (Some(a), Some(b)) => {
-                out.push_str(&format!("-{a}
+                out.push_str(&format!(
+                    "-{a}
 +{b}
-"));
+"
+                ));
                 i += 1;
                 j += 1;
             }
             (Some(a), None) => {
-                out.push_str(&format!("-{a}
-"));
+                out.push_str(&format!(
+                    "-{a}
+"
+                ));
                 i += 1;
             }
             (None, Some(b)) => {
-                out.push_str(&format!("+{b}
-"));
+                out.push_str(&format!(
+                    "+{b}
+"
+                ));
                 j += 1;
             }
             (None, None) => break,
@@ -1616,8 +1633,9 @@ mod tests {
         fn generate<'a>(
             &'a self,
             _request: &'a LlmRequest,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<LlmResponse>> + Send + 'a>>
-        {
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<LlmResponse>> + Send + 'a>,
+        > {
             use std::sync::atomic::Ordering::SeqCst;
             let now = self.in_flight.fetch_add(1, SeqCst) + 1;
             self.max_in_flight.fetch_max(now, SeqCst);

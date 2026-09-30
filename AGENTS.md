@@ -80,7 +80,7 @@ Yeni problem eklerken `quine-bench-simple` içinde hem çözücü stub'ı hem
   temizler, ```` ```rust ```` fence'lerini tercih eder, yoksa ham metinden ilk
   fonksiyon gövdesini (süslü parantez dengesi) ayıklar.
 - `data/` dizini `.gitignore`'dadır; içerik üretir, commit etme.
-- Docker sandbox varsayılan değildir (`local`); `QUINE_SANDBOX=docker` ile seç.
+- Docker sandbox **varsayılandır**; `QUINE_SANDBOX=local` ile (yalnızca geliştirme için) geri düşülür.
   `docker` seçiliyken Docker erişilemezse çalışma **durur** (sessizce
   `LocalProcessSandbox`'a düşmez — çekirdek ilke #5). `local` seçilirse uyarı basar.
   Sandbox: `--network none`, `--memory 512m`, `--cpus 1.0`, `--pids-limit 256`,
@@ -101,7 +101,7 @@ Yeni problem eklerken `quine-bench-simple` içinde hem çözücü stub'ı hem
 | Değişken | Varsayılan | Açıklama |
 |----------|-----------|----------|
 | `QUINE_MODEL` | `qwen2.5-coder:1.5b` | Ollama modeli |
-| `QUINE_SANDBOX` | `local` | `local` veya `docker` |
+| `QUINE_SANDBOX` | `docker` | `docker` (varsayılan) veya `local` |
 | `QUINE_TEMPERATURE` | `0.2` | Sampling; `0.0` = deterministik |
 | `QUINE_TEST_DOCKER` | (yok) | `1` → docker entegrasyon testi çalışır |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama adresi |
@@ -149,7 +149,7 @@ ve guardian kabul kriteri (rm -rf engeli + audit kaydı).
   `ScriptedBackend` yapay gecikmeyle çalışır ki adımlar gözle görülsün ve
   duraklat/iptal anlamlı olsun.
 - `quine-cli`: `serve`, `run`, `doctor`, `history` komutları.
-- Kalite: `fmt` + `clippy -D warnings` temiz; **108 test**; gerçek `quine`
+- Kalite: `fmt` + `clippy -D warnings` temiz; **117 test**; gerçek `quine`
   ikilisini ayağa kaldıran uçtan uca testler (`crates/quine-cli/tests/cli_serve.rs`):
   sunucu açılışı, güvenlik başlıkları, demo run'ın uçtan uca `completed`
   olması, geçersiz girdilerin `400` ile reddi.

@@ -479,7 +479,9 @@ mod tests {
     fn default_rules_are_all_critical() {
         // P0: varsayılan politika fail-closed olmalı — hiçbir kural Warning değil.
         assert!(
-            DEFAULT_RULES.iter().all(|r| r.severity == Severity::Critical),
+            DEFAULT_RULES
+                .iter()
+                .all(|r| r.severity == Severity::Critical),
             "tüm varsayılan kurallar kritik olmalı"
         );
     }
@@ -510,21 +512,54 @@ mod tests {
     fn adversarial_escapes_are_blocked() {
         let analyzer = DiffAnalyzer::default();
         let attacks: &[(&str, &str)] = &[
-            ("host dosyası okuma", r#"let s = std::fs::read_to_string("/etc/passwd").unwrap();"#),
-            ("host dosyasına yazma", r#"std::fs::write("/tmp/pwned", "x").unwrap();"#),
-            ("takma adlı fs", r#"use std::fs as f; f::write("/etc/cron.d/x", "y").unwrap();"#),
-            ("env sızıntısı", r#"let k = std::env::var("GITHUB_TOKEN").unwrap();"#),
+            (
+                "host dosyası okuma",
+                r#"let s = std::fs::read_to_string("/etc/passwd").unwrap();"#,
+            ),
+            (
+                "host dosyasına yazma",
+                r#"std::fs::write("/tmp/pwned", "x").unwrap();"#,
+            ),
+            (
+                "takma adlı fs",
+                r#"use std::fs as f; f::write("/etc/cron.d/x", "y").unwrap();"#,
+            ),
+            (
+                "env sızıntısı",
+                r#"let k = std::env::var("GITHUB_TOKEN").unwrap();"#,
+            ),
             ("env! makro", r#"let k = env!("SECRET_KEY");"#),
             ("mutlak yol", r#"let p = "/root/.ssh/id_rsa";"#),
             ("path traversal", r#"let p = "../../../etc/shadow";"#),
-            ("alt süreç", r#"std::process::Command::new("sh").arg("-c").arg("id").output();"#),
+            (
+                "alt süreç",
+                r#"std::process::Command::new("sh").arg("-c").arg("id").output();"#,
+            ),
             ("shell yıkım", r#"let c = "rm -rf /";"#),
-            ("ağ erişimi", r#"let s = std::net::TcpStream::connect("10.0.0.1:22");"#),
-            ("unsafe bellek", r#"let v: u64 = unsafe { core::mem::zeroed() };"#),
-            ("FFI/libc", r#"extern "C" { fn system(c: *const u8) -> i32; }"#),
-            ("derleme zamanı host okuma", r#"let x = include_str!("/etc/hostname");"#),
-            ("platform kaçışı", r#"use std::os::unix::fs::PermissionsExt;"#),
-            ("PathBuf ile kaçış", r#"let p = PathBuf::from("/etc/shadow");"#),
+            (
+                "ağ erişimi",
+                r#"let s = std::net::TcpStream::connect("10.0.0.1:22");"#,
+            ),
+            (
+                "unsafe bellek",
+                r#"let v: u64 = unsafe { core::mem::zeroed() };"#,
+            ),
+            (
+                "FFI/libc",
+                r#"extern "C" { fn system(c: *const u8) -> i32; }"#,
+            ),
+            (
+                "derleme zamanı host okuma",
+                r#"let x = include_str!("/etc/hostname");"#,
+            ),
+            (
+                "platform kaçışı",
+                r#"use std::os::unix::fs::PermissionsExt;"#,
+            ),
+            (
+                "PathBuf ile kaçış",
+                r#"let p = PathBuf::from("/etc/shadow");"#,
+            ),
         ];
         for (name, code) in attacks {
             let r = analyzer.analyze(code);
