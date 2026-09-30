@@ -607,10 +607,9 @@ impl Sandbox for DockerSandbox {
 impl DockerSandbox {
     async fn run_solution_impl(&self, problem: &Problem, llm_code: &str) -> Result<RunOutput> {
         if !DockerSandbox::available() {
-            tracing::warn!("docker yok — LocalProcessSandbox'a düşülüyor");
-            return LocalProcessSandbox::new(self.limits.clone())
-                .run_solution_impl(problem, llm_code)
-                .await;
+            // Savunma katmanı: construction'da kontrol edilir, ama docker
+            // çalışma sırasında düşerse yerel sandbox'a geçmek yasak.
+            bail!("Docker çalışma sırasında erişilemez hale geldi; yerel sandbox'a düşülmüyor");
         }
         let harness = build_harness_source(problem)?;
         let full_src = bench::inject_solution(&harness, llm_code);
@@ -686,15 +685,28 @@ impl DockerSandbox {
 }
 
 /// Hangi sandbox'ın kullanılacağını belirler (`QUINE_SANDBOX=local|docker`).
-pub fn sandbox_from_env() -> Box<dyn Sandbox> {
+pub fn sandbox_from_env() -> Result<Box<dyn Sandbox>> {
     sandbox_from_kind(&std::env::var("QUINE_SANDBOX").unwrap_or_default())
 }
 
-/// Verilen tür adına göre sandbox üretir ("docker" → DockerSandbox, aksi halde yerel).
-pub fn sandbox_from_kind(kind: &str) -> Box<dyn Sandbox> {
+/// Verilen tür adına göre sandbox üretir ("docker" → `DockerSandbox`, aksi halde yerel).
+///
+/// Güvenlik ilkesi: `docker` açıkça istendiyse ama erişilemiyorsa **sessizce
+/// yerel sandbox'a düşmek yoktur** — bu, ajan kodunun ana sistemde çalışmasına
+/// yol açardı. Bunun yerine hata döneriz.
+pub fn sandbox_from_kind(kind: &str) -> Result<Box<dyn Sandbox>> {
     match kind {
-        "docker" => Box::new(DockerSandbox::default()),
-        _ => Box::new(LocalProcessSandbox::default()),
+        "docker" => {
+            if !DockerSandbox::available() {
+                bail!(
+                    "sandbox=docker istendi ama Docker erişilemez (daemon kapalı veya \
+                     kullanıcı `docker` grubunda değil). Yerel sandbox'a sessizce düşmek \
+                     yerine duruyoruz; `QUINE_SANDBOX=local` ile açıkça seçebilirsiniz."
+                );
+            }
+            Ok(Box::new(DockerSandbox::default()))
+        }
+        _ => Ok(Box::new(LocalProcessSandbox::default())),
     }
 }
 
@@ -857,6 +869,28 @@ mod tests {
     use super::*;
     use quine_bench_simple::SimpleBenchmark;
     use quine_common::TestCase;
+
+    #[test]
+    fn sandbox_from_kind_defaults_to_local() {
+        // Boş/`local` → yerel sandbox; sessiz docker denemesi yok.
+        assert_eq!(sandbox_from_kind("").unwrap().kind(), "local");
+        assert_eq!(sandbox_from_kind("local").unwrap().kind(), "local");
+        assert_eq!(sandbox_from_kind("bilinmeyen").unwrap().kind(), "local");
+    }
+
+    #[test]
+    fn sandbox_from_kind_docker_fails_closed_without_docker() {
+        // Güvenlik regresyonu: docker erişilemiyorsa hata dönmeli, yerel
+        // sandbox'a sessizce düşmemeli.
+        if DockerSandbox::available() {
+            assert_eq!(sandbox_from_kind("docker").unwrap().kind(), "docker");
+        } else {
+            assert!(
+                sandbox_from_kind("docker").is_err(),
+                "docker erişilemezken sessizce local'e düşülmemeli"
+            );
+        }
+    }
 
     #[test]
     fn compact_json_formats_inputs() {

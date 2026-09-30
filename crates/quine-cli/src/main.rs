@@ -132,11 +132,13 @@ fn model_name(simulate: bool) -> String {
     }
 }
 
-fn build_evaluator() -> Arc<Evaluator> {
+fn build_evaluator() -> Result<Arc<Evaluator>> {
     let cfg = load_config();
-    let sandbox = quine_eval::sandbox_from_kind(&resolved_sandbox(&cfg));
+    let sandbox = quine_eval::sandbox_from_kind(&resolved_sandbox(&cfg))?;
     tracing::info!("sandbox: {}", sandbox.kind());
-    Arc::new(Evaluator::new(sandbox).with_audit(AuditLog::new(data_path("audit.log"))))
+    Ok(Arc::new(
+        Evaluator::new(sandbox).with_audit(AuditLog::new(data_path("audit.log"))),
+    ))
 }
 
 /// `data/config.json` içeriği (tüm alanlar isteğe bağlı).
@@ -323,7 +325,7 @@ async fn cmd_run_once(
     let problem = load_problem(problem_id, problem_file)?;
     let backend = backend_from_flags(simulate);
     let model = model_name(simulate);
-    let evaluator = build_evaluator();
+    let evaluator = build_evaluator()?;
 
     let mut agent = Agent::new(format!("run-once-{}", problem.id));
     println!(
@@ -380,7 +382,7 @@ async fn cmd_evolve(
     let problem = load_problem(problem_id, problem_file)?;
     let backend = backend_from_flags(simulate);
     let model = model_name(simulate);
-    let evaluator = build_evaluator();
+    let evaluator = build_evaluator()?;
 
     let mut agent = Agent::new(format!("evolve-{}", problem.id));
     let mut failures: Vec<EvaluationResult> = Vec::new();
@@ -471,7 +473,7 @@ async fn cmd_population_evolve(simulate: bool, generations: u32, size: usize) ->
 
     let backend = backend_from_flags(simulate);
     let model = model_name(simulate);
-    let evaluator = build_evaluator();
+    let evaluator = build_evaluator()?;
     let pm = PopulationManager::new(size, 2);
     let problems = SimpleBenchmark::problems();
 
