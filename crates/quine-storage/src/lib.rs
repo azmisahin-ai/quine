@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Geçerli şema sürümü. Şema değişince artırılır; migration adımları eklenir.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Bir run'ın yaşam döngüsü durumu (bkz. `quine-runtime` state machine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +143,9 @@ pub struct RunRecord {
     pub total_evaluations: u32,
     pub production_success: bool,
     pub error: Option<String>,
+    /// Run'ın kullandığı problem spesifikasyonunun anlık görüntüsü (JSON).
+    /// "Bu run hangi problemle yapıldı?" sorusunu sonradan yanıtlar.
+    pub problem_json: String,
     /// Determinizm/reproducibility için ortam parmak izi.
     pub quine_version: String,
     pub git_revision: String,
@@ -170,7 +173,10 @@ pub struct CandidateRecord {
     pub agent_id: String,
     pub parent_id: Option<String>,
     pub generation: u32,
+    /// Prompt (sistem talimatı) hash'i — öğrenilen dersler dahil.
     pub prompt_hash: String,
+    /// Üretilen kodun hash'i.
+    pub code_hash: String,
     pub code: String,
     pub score: f64,
     pub tests_passed: usize,
@@ -182,8 +188,31 @@ pub struct CandidateRecord {
     /// Bir önceki en iyi skora göre fark (nedensellik: "+12.5").
     pub delta: f64,
     pub mutation_reason: Option<String>,
+    /// Bu aday başarısızsa, hatanın kısa nedeni (UI'da gösterilir).
+    pub failure_reason: Option<String>,
+    /// Bu adaydan sonra öğrenilen `[ders]` kuralı (varsa).
+    pub learned_rule: Option<String>,
+    /// Bir önceki (ebeveyn) adayın kimliği — diff/karşılaştırma için.
+    pub parent_candidate_id: Option<String>,
     pub diff: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+/// Bir ajanın kalıcı kaydı. Ajanın evrimleşen prompt'u (genomu) run'lar arası
+/// korunur; böylece "öğrenilen ders" sonraki çalıştırmalarda da geçerli olur.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRecord {
+    pub id: String,
+    /// Ajanın ilk görüldüğü run (bilgi amaçlı; ilişki `agent_runs`'ta).
+    pub run_id: String,
+    pub name: String,
+    pub generation: u32,
+    pub parent_id: Option<String>,
+    pub prompt_hash: String,
+    pub system_prompt: String,
+    pub fitness_score: f64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Guardian denetim kaydı.
@@ -318,7 +347,10 @@ impl Store {
             conn.execute_batch(SCHEMA_V1)
                 .context("şema v1 uygulanamadı")?;
         }
-        // Gelecekteki migration adımları burada sıralanır (current < 2 { ... }).
+        if current < 2 {
+            conn.execute_batch(SCHEMA_V2)
+                .context("şema v2 uygulanamadı")?;
+        }
 
         conn.execute(
             "INSERT INTO app_metadata(key,value) VALUES('schema_version',?1)
@@ -352,15 +384,15 @@ impl Store {
                 problem_id, problem_title, model, temperature, sandbox,
                 generation, iteration, best_score, best_agent_id,
                 total_llm_calls, total_evaluations, production_success, error,
-                quine_version, git_revision, sandbox_image
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+                problem_json, quine_version, git_revision, sandbox_image
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
             params![
                 r.id, r.created_at, r.started_at, r.finished_at,
                 r.status.as_str(), r.workload.as_str(),
                 r.problem_id, r.problem_title, r.model, r.temperature, r.sandbox,
                 r.generation, r.iteration, r.best_score, r.best_agent_id,
                 r.total_llm_calls, r.total_evaluations, r.production_success as i64, r.error,
-                r.quine_version, r.git_revision, r.sandbox_image,
+                r.problem_json, r.quine_version, r.git_revision, r.sandbox_image,
             ],
         )?;
         Ok(())
@@ -407,6 +439,104 @@ impl Store {
         ))?;
         let rows = stmt
             .query_map(params![limit as i64], row_to_run)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // ---- agents (kalıcı genom) -------------------------------------------
+
+    /// Ajan kaydını ekler/günceller. `system_prompt` evrimleştikçe üzerine yazılır;
+    /// böylece öğrenilen `[ders]` kuralları run'lar arası korunur.
+    pub fn upsert_agent(&self, a: &AgentRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents(id, run_id, name, generation, parent_id, prompt_hash,
+                                system_prompt, fitness_score, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+             ON CONFLICT(id) DO UPDATE SET
+                generation=excluded.generation,
+                parent_id=excluded.parent_id,
+                prompt_hash=excluded.prompt_hash,
+                system_prompt=excluded.system_prompt,
+                fitness_score=excluded.fitness_score,
+                updated_at=excluded.updated_at",
+            params![
+                a.id,
+                a.run_id,
+                a.name,
+                a.generation,
+                a.parent_id,
+                a.prompt_hash,
+                a.system_prompt,
+                a.fitness_score,
+                a.created_at,
+                a.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_agent(&self, id: &str) -> Result<Option<AgentRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, name, generation, parent_id, prompt_hash, system_prompt,
+                    fitness_score, created_at, COALESCE(updated_at, created_at)
+             FROM agents WHERE id=?1",
+        )?;
+        let row = stmt
+            .query_row(params![id], |r| {
+                Ok(AgentRecord {
+                    id: r.get(0)?,
+                    run_id: r.get(1)?,
+                    name: r.get(2)?,
+                    generation: r.get::<_, i64>(3)? as u32,
+                    parent_id: r.get(4)?,
+                    prompt_hash: r.get(5)?,
+                    system_prompt: r.get(6)?,
+                    fitness_score: r.get(7)?,
+                    created_at: r.get(8)?,
+                    updated_at: r.get(9)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Bir ajanı run'a bağlar (agent ↔ run ilişkisi).
+    pub fn link_agent_run(&self, agent_id: &str, run_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO agent_runs(agent_id, run_id, joined_at) VALUES (?1,?2,?3)",
+            params![agent_id, run_id, Utc::now()],
+        )?;
+        Ok(())
+    }
+
+    /// Bir run'a katılan ajanları döner.
+    pub fn list_run_agents(&self, run_id: &str) -> Result<Vec<AgentRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT a.id, a.run_id, a.name, a.generation, a.parent_id, a.prompt_hash,
+                    a.system_prompt, a.fitness_score, a.created_at,
+                    COALESCE(a.updated_at, a.created_at)
+             FROM agents a JOIN agent_runs ar ON ar.agent_id = a.id
+             WHERE ar.run_id=?1 ORDER BY a.generation ASC, a.created_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id], |r| {
+                Ok(AgentRecord {
+                    id: r.get(0)?,
+                    run_id: r.get(1)?,
+                    name: r.get(2)?,
+                    generation: r.get::<_, i64>(3)? as u32,
+                    parent_id: r.get(4)?,
+                    prompt_hash: r.get(5)?,
+                    system_prompt: r.get(6)?,
+                    fitness_score: r.get(7)?,
+                    created_at: r.get(8)?,
+                    updated_at: r.get(9)?,
+                })
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -463,10 +593,10 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO candidates(
-                id, run_id, agent_id, parent_id, generation, prompt_hash, code, score,
+                id, run_id, agent_id, parent_id, generation, prompt_hash, code_hash, code, score,
                 tests_passed, tests_total, duration_ms, model, status, accepted, delta,
-                mutation_reason, diff, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                mutation_reason, failure_reason, learned_rule, parent_candidate_id, diff, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
             params![
                 c.id,
                 c.run_id,
@@ -474,6 +604,7 @@ impl Store {
                 c.parent_id,
                 c.generation,
                 c.prompt_hash,
+                c.code_hash,
                 c.code,
                 c.score,
                 c.tests_passed as i64,
@@ -484,6 +615,9 @@ impl Store {
                 c.accepted as i64,
                 c.delta,
                 c.mutation_reason,
+                c.failure_reason,
+                c.learned_rule,
+                c.parent_candidate_id,
                 c.diff,
                 c.created_at,
             ],
@@ -491,12 +625,22 @@ impl Store {
         Ok(())
     }
 
+    /// Bir adaya, ondan sonra öğrenilen `[ders]` kuralını işler.
+    pub fn set_candidate_learned_rule(&self, candidate_id: &str, rule: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE candidates SET learned_rule=?2 WHERE id=?1",
+            params![candidate_id, rule],
+        )?;
+        Ok(())
+    }
+
     pub fn list_candidates(&self, run_id: &str) -> Result<Vec<CandidateRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, agent_id, parent_id, generation, prompt_hash, code, score,
+            "SELECT id, run_id, agent_id, parent_id, generation, prompt_hash, code_hash, code, score,
                     tests_passed, tests_total, duration_ms, model, status, accepted, delta,
-                    mutation_reason, diff, created_at
+                    mutation_reason, failure_reason, learned_rule, parent_candidate_id, diff, created_at
              FROM candidates WHERE run_id=?1 ORDER BY generation ASC, created_at ASC",
         )?;
         let rows = stmt
@@ -508,18 +652,22 @@ impl Store {
                     parent_id: r.get(3)?,
                     generation: r.get::<_, i64>(4)? as u32,
                     prompt_hash: r.get(5)?,
-                    code: r.get(6)?,
-                    score: r.get(7)?,
-                    tests_passed: r.get::<_, i64>(8)? as usize,
-                    tests_total: r.get::<_, i64>(9)? as usize,
-                    duration_ms: r.get::<_, i64>(10)? as u64,
-                    model: r.get(11)?,
-                    status: r.get(12)?,
-                    accepted: r.get::<_, i64>(13)? != 0,
-                    delta: r.get(14)?,
-                    mutation_reason: r.get(15)?,
-                    diff: r.get(16)?,
-                    created_at: r.get(17)?,
+                    code_hash: r.get(6)?,
+                    code: r.get(7)?,
+                    score: r.get(8)?,
+                    tests_passed: r.get::<_, i64>(9)? as usize,
+                    tests_total: r.get::<_, i64>(10)? as usize,
+                    duration_ms: r.get::<_, i64>(11)? as u64,
+                    model: r.get(12)?,
+                    status: r.get(13)?,
+                    accepted: r.get::<_, i64>(14)? != 0,
+                    delta: r.get(15)?,
+                    mutation_reason: r.get(16)?,
+                    failure_reason: r.get(17)?,
+                    learned_rule: r.get(18)?,
+                    parent_candidate_id: r.get(19)?,
+                    diff: r.get(20)?,
+                    created_at: r.get(21)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -643,10 +791,18 @@ impl Store {
                 "SELECT COUNT(*) FROM audit_records WHERE decision='blocked'",
             )?,
             llm_calls_total: count("SELECT COALESCE(SUM(total_llm_calls),0) FROM runs")?,
+            candidates_total: count("SELECT COUNT(*) FROM candidates")?,
             best_score: float("SELECT COALESCE(MAX(best_score),0.0) FROM runs"),
+            // Ortalama skor TÜM sonuçlanmış run'lar üzerinden hesaplanır; aksi
+            // halde yalnızca başarılı run'lar sayılıp metrik yanıltıcı biçimde
+            // hep 100 görünür.
             avg_score: float(
-                "SELECT COALESCE(AVG(best_score),0.0) FROM runs WHERE status='completed'",
+                "SELECT COALESCE(AVG(best_score),0.0) FROM runs
+                 WHERE status IN ('completed','failed','limit_reached','interrupted','cancelled')",
             ),
+            // Adayların ortalama skoru: evrimsel ilerlemenin gerçek göstergesi.
+            avg_candidate_score: float("SELECT COALESCE(AVG(score),0.0) FROM candidates"),
+            best_generation: count("SELECT COALESCE(MAX(generation),0) FROM runs")?,
         })
     }
 
@@ -675,8 +831,11 @@ pub struct Metrics {
     pub evaluations_total: i64,
     pub guardian_blocks: i64,
     pub llm_calls_total: i64,
+    pub candidates_total: i64,
     pub best_score: f64,
     pub avg_score: f64,
+    pub avg_candidate_score: f64,
+    pub best_generation: i64,
 }
 
 fn row_to_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
@@ -702,9 +861,10 @@ fn row_to_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
         total_evaluations: r.get::<_, i64>(16)? as u32,
         production_success: r.get::<_, i64>(17)? != 0,
         error: r.get(18)?,
-        quine_version: r.get(19)?,
-        git_revision: r.get(20)?,
-        sandbox_image: r.get(21)?,
+        problem_json: r.get(19)?,
+        quine_version: r.get(20)?,
+        git_revision: r.get(21)?,
+        sandbox_image: r.get(22)?,
     })
 }
 
@@ -712,19 +872,19 @@ const RUN_COLS: &str = "id, created_at, started_at, finished_at, status, workloa
     problem_id, problem_title, model, temperature, sandbox,
     generation, iteration, best_score, best_agent_id,
     total_llm_calls, total_evaluations, production_success, error,
-    quine_version, git_revision, sandbox_image";
+    problem_json, quine_version, git_revision, sandbox_image";
 
 const RUN_SELECT_BASE: &str = "SELECT id, created_at, started_at, finished_at, status, workload,
     problem_id, problem_title, model, temperature, sandbox,
     generation, iteration, best_score, best_agent_id,
     total_llm_calls, total_evaluations, production_success, error,
-    quine_version, git_revision, sandbox_image FROM runs";
+    problem_json, quine_version, git_revision, sandbox_image FROM runs";
 
 const RUN_SELECT_WHERE: &str = "SELECT id, created_at, started_at, finished_at, status, workload,
     problem_id, problem_title, model, temperature, sandbox,
     generation, iteration, best_score, best_agent_id,
     total_llm_calls, total_evaluations, production_success, error,
-    quine_version, git_revision, sandbox_image FROM runs WHERE id=?1";
+    problem_json, quine_version, git_revision, sandbox_image FROM runs WHERE id=?1";
 
 #[allow(dead_code)]
 const _RUN_COLS_UNUSED: &str = RUN_COLS;
@@ -854,6 +1014,34 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
 "#;
 
+/// Şema v2 — evolution görünürlüğü ve öğrenme kalıcılığı.
+///
+/// * `candidates.code_hash` — kod içeriğinin hash'i (`prompt_hash` yalnızca
+///   prompt içindir; ikisini ayırmak için eklendi).
+/// * `candidates.learned_rule` / `failure_reason` — bir sonraki generation'a
+///   taşınan dersin ve başarısızlığın gerçek kaydı.
+/// * `runs.problem_json` — run'ın hangi problem spesifikasyonuyla yapıldığının
+///   anlık görüntüsü (task persistence).
+/// * `agents` + `agent_runs` — evrimleşen prompt'un run'lar arası kalıcılığı.
+const SCHEMA_V2: &str = r#"
+ALTER TABLE candidates ADD COLUMN code_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE candidates ADD COLUMN learned_rule TEXT;
+ALTER TABLE candidates ADD COLUMN failure_reason TEXT;
+ALTER TABLE candidates ADD COLUMN parent_candidate_id TEXT;
+
+ALTER TABLE runs ADD COLUMN problem_json TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE agents ADD COLUMN updated_at TEXT;
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    agent_id   TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    run_id     TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    joined_at  TEXT NOT NULL,
+    PRIMARY KEY (agent_id, run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_run ON agent_runs(run_id);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,6 +1067,7 @@ mod tests {
             total_evaluations: 0,
             production_success: false,
             error: None,
+            problem_json: "{}".into(),
             quine_version: "0.1.0".into(),
             git_revision: "test".into(),
             sandbox_image: "rust:1-slim-bookworm".into(),

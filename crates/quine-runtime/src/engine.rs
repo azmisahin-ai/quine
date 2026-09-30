@@ -285,7 +285,7 @@ impl RunEngine {
             Evaluator::new(sandbox).with_audit(AuditLog::new(self.ctx.data_dir.join("audit.log"))),
         );
 
-        let run = Run::new(
+        let mut run = Run::new(
             Uuid::new_v4().to_string(),
             req.workload,
             req.problem.id.clone(),
@@ -294,7 +294,32 @@ impl RunEngine {
             req.config.temperature,
             sandbox_kind.clone(),
         );
+        // Task persistence: kullanılan problem spesifikasyonunu sakla.
+        run.problem_json = serde_json::to_string(&req.problem).unwrap_or_default();
         let run_id = run.id.clone();
+
+        // Kalıcı ajan genomu: problem başına tek bir ajan kimliği tutulur, böylece
+        // öğrenilen `[ders]` kuralları sonraki çalıştırmalarda da geçerli olur.
+        let agent_uuid = format!("agent-{}", req.problem.id);
+        let base_prompt = quine_common::default_system_prompt().to_string();
+        let existing = self.ctx.store.get_agent(&agent_uuid).unwrap_or(None);
+        let (prompt_for_run, created_at) = match &existing {
+            Some(a) => (a.system_prompt.clone(), a.created_at),
+            None => (base_prompt.clone(), Utc::now()),
+        };
+        let _ = self.ctx.store.upsert_agent(&quine_storage::AgentRecord {
+            id: agent_uuid.clone(),
+            run_id: run_id.clone(),
+            name: req.problem.id.clone(),
+            generation: 0,
+            parent_id: None,
+            prompt_hash: hash_str(&prompt_for_run),
+            system_prompt: prompt_for_run.clone(),
+            fitness_score: existing.as_ref().map(|a| a.fitness_score).unwrap_or(0.0),
+            created_at,
+            updated_at: Utc::now(),
+        });
+        let _ = self.ctx.store.link_agent_run(&agent_uuid, &run_id);
         self.ctx
             .store
             .insert_run(&run.to_record(&self.ctx.build, &sandbox_image))?;
@@ -324,6 +349,7 @@ impl RunEngine {
                 guardian: DiffAnalyzer::default(),
                 started: Instant::now(),
                 semaphore: Arc::new(Semaphore::new(1)),
+                agent_uuid,
             };
             runner.run().await
         });
@@ -340,11 +366,362 @@ impl RunEngine {
 struct CandidateInput<'a> {
     agent_id: &'a str,
     parent_id: Option<String>,
+    parent_candidate_id: Option<String>,
     generation: u32,
     code: &'a str,
     result: &'a EvaluationResult,
     delta: f64,
     reason: Option<String>,
+    learned_rule: Option<String>,
+    prompt: &'a str,
+    previous_code: Option<&'a str>,
+}
+
+/// Paralel değerlendirme için tek bir aday görevi.
+struct CandidateTask {
+    agent_id: String,
+    prompt: String,
+    generation: u32,
+}
+
+/// Olayları yayan hafif yardımcı (paylaşılan üretim bağlamı için).
+#[derive(Clone)]
+struct Emitter {
+    bus: EventBus,
+    store: Arc<Store>,
+    run_id: String,
+}
+
+impl Emitter {
+    fn emit(
+        &self,
+        kind: RunEventKind,
+        agent_id: Option<String>,
+        generation: Option<u32>,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        self.bus
+            .emit(&self.run_id, kind, agent_id.clone(), generation, None, payload)?;
+        Ok(())
+    }
+
+    /// Guardian kararını denetim defterine yazar (run'a bağlı).
+    fn audit(
+        &self,
+        agent_id: &str,
+        decision: AuditDecision,
+        rule: Option<String>,
+        severity: Option<String>,
+        reason: &str,
+    ) {
+        let entry = AuditEntry {
+            id: 0,
+            run_id: Some(self.run_id.clone()),
+            timestamp: Utc::now(),
+            decision: match decision {
+                AuditDecision::Allowed => "allowed".into(),
+                AuditDecision::Blocked => "blocked".into(),
+            },
+            rule,
+            severity,
+            file: None,
+            agent_id: Some(agent_id.to_string()),
+            reason: reason.to_string(),
+        };
+        let _ = self.store.insert_audit(&entry);
+    }
+}
+
+/// Paylaşılan üretim/değerlendirme bağlamı: hem sıralı (single/evolve) hem
+/// paralel (population) yol aynı mantığı kullanır.
+#[derive(Clone)]
+struct ProduceCtx {
+    emitter: Emitter,
+    guardian: DiffAnalyzer,
+    backend: Arc<dyn LlmBackend>,
+    evaluator: Arc<Evaluator>,
+    problem: Problem,
+    model: String,
+    temperature: f32,
+    max_candidate_size: usize,
+    sandbox: String,
+}
+
+/// LLM → kod → guardian → sandbox → test zincirini yürütür (bağımsız, paralel
+/// çalıştırılabilir). İptalde `select!` ile düşer; sandbox alt süreçleri
+/// `kill_on_drop` ile öldürülür.
+async fn produce_candidate(
+    ctx: &ProduceCtx,
+    agent_id: &str,
+    gen: u32,
+    prompt: &str,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<(String, EvaluationResult)> {
+    let request = LlmRequest {
+        model: ctx.model.clone(),
+        system: prompt.to_string(),
+        prompt: ctx.problem.to_llm_prompt(),
+        temperature: ctx.temperature,
+        max_tokens: 1024,
+    };
+
+    ctx.emitter.emit(
+        RunEventKind::LlmRequestStarted,
+        Some(agent_id.to_string()),
+        Some(gen),
+        serde_json::json!({"model": request.model}),
+    )?;
+    let t0 = Instant::now();
+    let response = tokio::select! {
+        r = ctx.backend.generate(&request) => r.context("LLM üretimi")?,
+        _ = wait_cancel(cancel_rx) => anyhow::bail!("run iptal edildi (LLM beklenirken)"),
+    };
+    ctx.emitter.emit(
+        RunEventKind::LlmResponseReceived,
+        Some(agent_id.to_string()),
+        Some(gen),
+        serde_json::json!({
+            "model": response.model,
+            "bytes": response.content.len(),
+            "duration_ms": t0.elapsed().as_millis() as u64,
+        }),
+    )?;
+
+    let code = match response.extract_code_checked() {
+        Ok(c) => c,
+        Err(e) => {
+            let reason = format!("model kod üretmedi: {e:#}");
+            let result = EvaluationResult {
+                problem_id: ctx.problem.id.clone(),
+                agent_id: Uuid::parse_str(agent_id).unwrap_or_else(|_| Uuid::new_v4()),
+                success: false,
+                score: 0.0,
+                stdout: String::new(),
+                stderr: reason.clone(),
+                duration_ms: 0,
+                tests_passed: 0,
+                tests_total: ctx.problem.test_cases.len(),
+                evaluated_at: Utc::now(),
+            };
+            ctx.emitter.emit(
+                RunEventKind::EvaluationCompleted,
+                Some(agent_id.to_string()),
+                Some(gen),
+                serde_json::json!({
+                    "score": 0.0, "success": false,
+                    "reason": "model_no_code", "failure_reason": reason,
+                }),
+            )?;
+            return Ok((String::new(), result));
+        }
+    };
+    ctx.emitter.emit(
+        RunEventKind::CodeExtracted,
+        Some(agent_id.to_string()),
+        Some(gen),
+        serde_json::json!({"bytes": code.len()}),
+    )?;
+
+    if code.len() > ctx.max_candidate_size {
+        anyhow::bail!(
+            "aday kod boyutu limiti aşıldı ({} > {})",
+            code.len(),
+            ctx.max_candidate_size
+        );
+    }
+
+    // Guardian kapısı — fail-closed: kritik ihlalde sandbox'a hiç gidilmez.
+    let t_g = Instant::now();
+    if let Err(v) = ctx.guardian.analyze(&code) {
+        let rule = v.violations.first().map(|f| f.rule.clone());
+        let severity = v.violations.first().map(|f| format!("{:?}", f.severity));
+        let reason = v.to_string();
+        ctx.emitter.emit(
+            RunEventKind::GuardianBlocked,
+            Some(agent_id.to_string()),
+            Some(gen),
+            serde_json::json!({
+                "rule": rule, "severity": severity, "reason": reason,
+                "duration_ms": t_g.elapsed().as_millis() as u64,
+            }),
+        )?;
+        let result = EvaluationResult {
+            problem_id: ctx.problem.id.clone(),
+            agent_id: Uuid::parse_str(agent_id).unwrap_or_else(|_| Uuid::new_v4()),
+            success: false,
+            score: 0.0,
+            stdout: String::new(),
+            stderr: format!("GUARDIAN BLOCKED: {reason}"),
+            duration_ms: t_g.elapsed().as_millis() as u64,
+            tests_passed: 0,
+            tests_total: ctx.problem.test_cases.len(),
+            evaluated_at: Utc::now(),
+        };
+        ctx.emitter.audit(
+            agent_id,
+            AuditDecision::Blocked,
+            rule.clone(),
+            severity,
+            &reason,
+        );
+        ctx.emitter.emit(
+            RunEventKind::CandidateRejected,
+            Some(agent_id.to_string()),
+            Some(gen),
+            serde_json::json!({"reason": "guardian_blocked", "rule": rule}),
+        )?;
+        ctx.emitter.emit(
+            RunEventKind::EvaluationCompleted,
+            Some(agent_id.to_string()),
+            Some(gen),
+            serde_json::json!({
+                "score": 0.0, "success": false,
+                "tests_passed": 0, "tests_total": result.tests_total,
+                "failure_reason": "guardian tarafından engellendi",
+            }),
+        )?;
+        return Ok((code, result));
+    }
+    ctx.emitter.emit(
+        RunEventKind::GuardianAllowed,
+        Some(agent_id.to_string()),
+        Some(gen),
+        serde_json::json!({"duration_ms": t_g.elapsed().as_millis() as u64}),
+    )?;
+    ctx.emitter
+        .audit(agent_id, AuditDecision::Allowed, None, None, "guardian geçti");
+
+    ctx.emitter.emit(
+        RunEventKind::SandboxStarted,
+        Some(agent_id.to_string()),
+        Some(gen),
+        serde_json::json!({"sandbox": ctx.sandbox}),
+    )?;
+    let t_s = Instant::now();
+    let ev = ctx.evaluator.clone();
+    let problem = ctx.problem.clone();
+    let id = Uuid::parse_str(agent_id).unwrap_or_else(|_| Uuid::new_v4());
+    let result = tokio::select! {
+        r = ev.evaluate(id, &problem, &code) => r,
+        _ = wait_cancel(cancel_rx) => anyhow::bail!("run iptal edildi (sandbox çalışırken)"),
+    };
+    ctx.emitter.emit(
+        RunEventKind::SandboxCompleted,
+        Some(agent_id.to_string()),
+        Some(gen),
+        serde_json::json!({
+            "duration_ms": t_s.elapsed().as_millis() as u64,
+            "ok": !result.stderr.contains("SANDBOX ERROR"),
+        }),
+    )?;
+    ctx.emitter.emit(
+        RunEventKind::TestsCompleted,
+        Some(agent_id.to_string()),
+        Some(gen),
+        serde_json::json!({"passed": result.tests_passed, "total": result.tests_total}),
+    )?;
+    ctx.emitter.emit(
+        RunEventKind::EvaluationCompleted,
+        Some(agent_id.to_string()),
+        Some(gen),
+        serde_json::json!({
+            "score": result.score,
+            "success": result.success,
+            "tests_passed": result.tests_passed,
+            "tests_total": result.tests_total,
+            "failure_reason": if result.success { None } else { Some(failure_summary(&result.stderr)) },
+        }),
+    )?;
+    Ok((code, result))
+}
+
+/// İptal sinyalini bekleyen gelecek (paylaşılan üretim bağlamı için).
+async fn wait_cancel(rx: &mut watch::Receiver<bool>) {
+    if *rx.borrow() {
+        return;
+    }
+    let _ = rx.changed().await;
+}
+
+/// Başarısızlık nedenini kısa, insan okunur bir cümleye indirger.
+fn failure_summary(stderr: &str) -> String {
+    let t = stderr.trim();
+    if t.is_empty() {
+        return "bilinmeyen hata".into();
+    }
+    if t.contains("GUARDIAN BLOCKED") {
+        return "güvenlik kontrolü kodu engelledi".into();
+    }
+    if t.contains("MODEL KOD ÜRETMEDİ") || t.contains("model kod üretmedi") {
+        return "model geçerli kod üretmedi".into();
+    }
+    if let Some(line) = t.lines().find(|l| l.starts_with("error[")) {
+        return line.trim().to_string();
+    }
+    if let Some(line) = t.lines().find(|l| l.starts_with("error:")) {
+        return line.trim().to_string();
+    }
+    if t.contains("Başarısız testler") {
+        return "test beklentileri karşılanmadı".into();
+    }
+    t.lines()
+        .next()
+        .unwrap_or("bilinmeyen hata")
+        .chars()
+        .take(160)
+        .collect()
+}
+
+/// İki kod sürümü arasında basit satır diff'i (harici bağımlılık yok).
+fn simple_diff(old: &str, new: &str) -> String {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < old_lines.len() || j < new_lines.len() {
+        match (old_lines.get(i), new_lines.get(j)) {
+            (Some(a), Some(b)) if a == b => {
+                i += 1;
+                j += 1;
+            }
+            (Some(a), Some(b)) => {
+                out.push_str(&format!("-{a}
++{b}
+"));
+                i += 1;
+                j += 1;
+            }
+            (Some(a), None) => {
+                out.push_str(&format!("-{a}
+"));
+                i += 1;
+            }
+            (None, Some(b)) => {
+                out.push_str(&format!("+{b}
+"));
+                j += 1;
+            }
+            (None, None) => break,
+        }
+    }
+    if out.is_empty() {
+        "değişiklik yok".to_string()
+    } else {
+        out
+    }
+}
+
+/// İki prompt arasında yeni eklenen `[ders]` kuralını çıkarır.
+fn extract_new_rule(old_prompt: &str, new_prompt: &str) -> Option<String> {
+    new_prompt.lines().find_map(|l| {
+        let t = l.trim();
+        if t.starts_with("[ders]") && !old_prompt.contains(t) {
+            Some(t.trim_start_matches("[ders]").trim().to_string())
+        } else {
+            None
+        }
+    })
 }
 
 struct Runner {
@@ -362,6 +739,8 @@ struct Runner {
     guardian: DiffAnalyzer,
     started: Instant,
     semaphore: Arc<Semaphore>,
+    /// Kök ajan kimliği — öğrenilen genom bu kimlik altında run'lar arası saklanır.
+    agent_uuid: String,
 }
 
 impl Runner {
@@ -429,24 +808,46 @@ impl Runner {
 
     async fn mode_single(&mut self) -> Result<()> {
         let agent_id = Uuid::new_v4().to_string();
-        let (code, result) = self.generate_and_evaluate(&agent_id, 0).await?;
+        let prompt = self.persistent_prompt();
+        let (code, result) = self
+            .generate_and_evaluate_with_prompt(&agent_id, 0, &prompt)
+            .await?;
         self.record_candidate(CandidateInput {
             agent_id: &agent_id,
             parent_id: None,
+            parent_candidate_id: None,
             generation: 0,
             code: &code,
             result: &result,
             delta: 0.0,
             reason: None,
+            learned_rule: None,
+            prompt: &prompt,
+            previous_code: None,
         })?;
+        self.learn_and_persist(&result);
         self.finalize(&result, 0)
+    }
+
+    /// Ajanın kalıcı prompt'unu döner (önceki run'larda öğrenilen dersler dahil).
+    fn persistent_prompt(&self) -> String {
+        self.ctx
+            .store
+            .get_agent(&self.agent_uuid)
+            .ok()
+            .flatten()
+            .map(|a| a.system_prompt)
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or_else(|| quine_common::default_system_prompt().to_string())
     }
 
     async fn mode_evolve(&mut self) -> Result<()> {
         let mut agent_id = Uuid::new_v4().to_string();
         let mut parent: Option<String> = None;
         let mut previous_best = 0.0f64;
-        let mut prompt = quine_common::default_system_prompt().to_string();
+        let mut prompt = self.persistent_prompt();
+        let mut previous_code: Option<String> = None;
+        let mut parent_candidate_id: Option<String> = None;
 
         for iteration in 0..self.config.limits.max_iterations {
             if self.should_stop(iteration)? {
@@ -460,18 +861,27 @@ impl Runner {
                 .await?;
 
             let delta = result.score - previous_best;
-            self.record_candidate(CandidateInput {
+            let failure_reason = (!result.success).then(|| failure_summary(&result.stderr));
+            let blocked = result.stderr.contains("GUARDIAN BLOCKED");
+
+            let cand_id = self.record_candidate(CandidateInput {
                 agent_id: &agent_id,
                 parent_id: parent.clone(),
+                parent_candidate_id: parent_candidate_id.clone(),
                 generation: gen,
                 code: &code,
                 result: &result,
                 delta,
                 reason: None,
+                learned_rule: None,
+                prompt: &prompt,
+                previous_code: previous_code.as_deref(),
             })?;
+            previous_code = Some(code.clone());
             self.run.total_evaluations += 1;
 
             if result.success {
+                self.learn_and_persist(&result);
                 return self.finalize(&result, gen);
             }
 
@@ -480,22 +890,44 @@ impl Runner {
                 RunEventKind::MutationProposed,
                 Some(agent_id.clone()),
                 Some(gen),
-                serde_json::json!({"failed_tests": result.tests_total - result.tests_passed}),
+                serde_json::json!({
+                    "previous_score": result.score,
+                    "failed_tests": result.tests_total - result.tests_passed,
+                    "failure_reason": failure_reason,
+                    "guardian_blocked": blocked,
+                    "candidate_id": cand_id,
+                }),
             )?;
-            let new_prompt = self
+            let (new_prompt, learned_rule) = self
                 .propose_mutation(&prompt, &result, agent_id.clone(), gen)
                 .await?;
+
+            // Öğrenilen kuralı adaya işle (UI "ne öğrendi?" sorusunu yanıtlar).
+            if let Some(rule) = &learned_rule {
+                let _ = self.ctx.store.set_candidate_learned_rule(&cand_id, rule);
+            }
 
             let improved = result.score >= previous_best;
             if improved {
                 previous_best = result.score;
+                if result.score > self.run.best_score {
+                    self.run.best_score = result.score;
+                }
                 self.emit(
                     RunEventKind::MutationAccepted,
                     Some(agent_id.clone()),
                     Some(gen),
-                    serde_json::json!({"score": result.score}),
+                    serde_json::json!({
+                        "previous_score": result.score,
+                        "new_score": result.score,
+                        "delta": delta,
+                        "learned_rule": learned_rule,
+                        "parent_candidate_id": cand_id,
+                        "failure_reason": failure_reason,
+                    }),
                 )?;
                 parent = Some(agent_id.clone());
+                parent_candidate_id = Some(cand_id.clone());
                 agent_id = Uuid::new_v4().to_string();
                 prompt = new_prompt;
                 self.run.generation += 1;
@@ -504,14 +936,27 @@ impl Runner {
                     RunEventKind::MutationRejected,
                     Some(agent_id.clone()),
                     Some(gen),
-                    serde_json::json!({"score": result.score, "best": previous_best}),
+                    serde_json::json!({
+                        "previous_score": result.score,
+                        "new_score": result.score,
+                        "delta": delta,
+                        "best": previous_best,
+                        "learned_rule": learned_rule,
+                        "parent_candidate_id": cand_id,
+                        "failure_reason": failure_reason,
+                    }),
                 )?;
+                // Reddedilse de öğrenilen kural prompt'a eklenir (denemeye devam).
+                prompt = new_prompt;
             }
             self.emit(
                 RunEventKind::GenerationCompleted,
                 Some(agent_id.clone()),
                 Some(gen),
-                serde_json::json!({"best_score": self.run.best_score}),
+                serde_json::json!({
+                    "best_score": self.run.best_score,
+                    "generation": gen,
+                }),
             )?;
         }
 
@@ -528,7 +973,7 @@ impl Runner {
         self.semaphore = Arc::new(Semaphore::new(self.config.limits.max_concurrent));
 
         // Jenerasyon 0: başlangıç popülasyonu (hepsi aynı taban prompt).
-        let base_prompt = quine_common::default_system_prompt().to_string();
+        let base_prompt = self.persistent_prompt();
         let mut population: Vec<(String, String, f64)> = (0..size)
             .map(|_| (Uuid::new_v4().to_string(), base_prompt.clone(), 0.0))
             .collect();
@@ -539,30 +984,73 @@ impl Runner {
                 return Ok(());
             }
             self.run.generation = gen;
-            let mut scored: Vec<(String, String, f64)> = Vec::with_capacity(size);
 
-            for (agent_id, prompt, _) in population.iter() {
-                self.checkpoint().await;
-                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
-                let (code, result) = self
-                    .generate_and_evaluate_with_prompt(agent_id, gen, prompt)
-                    .await?;
-                self.record_candidate(CandidateInput {
-                    agent_id,
-                    parent_id: None,
+            // Kalan LLM bütçesine göre bu jenerasyonun boyutunu sınırla.
+            let remaining = self
+                .config
+                .limits
+                .max_llm_calls
+                .saturating_sub(self.run.total_llm_calls) as usize;
+            if remaining == 0 {
+                self.set_status(RunStatus::LimitReached, RunEventKind::LimitReached, None)?;
+                return Ok(());
+            }
+            let batch: Vec<CandidateTask> = population
+                .iter()
+                .take(remaining.min(size))
+                .map(|(id, p, _)| CandidateTask {
+                    agent_id: id.clone(),
+                    prompt: p.clone(),
                     generation: gen,
-                    code: &code,
-                    result: &result,
-                    delta: 0.0,
-                    reason: None,
-                })?;
-                self.run.total_evaluations += 1;
-                scored.push((agent_id.clone(), prompt.clone(), result.score));
-                drop(permit);
+                })
+                .collect();
+            let batch_len = batch.len();
 
-                if result.success {
-                    return self.finalize(&result, gen);
+            // GERÇEK paralellik: tüm adaylar eşzamanlı üretilir/değerlendirilir.
+            let results = self.run_batch(batch).await?;
+            self.run.total_llm_calls += batch_len as u32;
+
+            let mut scored: Vec<(String, String, f64)> = Vec::with_capacity(batch_len);
+            let mut solved: Option<EvaluationResult> = None;
+            let mut cancelled = false;
+            for (agent_id, prompt, outcome) in results {
+                self.run.total_evaluations += 1;
+                match outcome {
+                    Ok((code, result)) => {
+                        self.record_candidate(CandidateInput {
+                            agent_id: &agent_id,
+                            parent_id: None,
+                            parent_candidate_id: None,
+                            generation: gen,
+                            code: &code,
+                            result: &result,
+                            delta: 0.0,
+                            reason: None,
+                            learned_rule: None,
+                            prompt: &prompt,
+                            previous_code: None,
+                        })?;
+                        if result.success {
+                            solved = Some(result.clone());
+                        }
+                        scored.push((agent_id, prompt, result.score));
+                    }
+                    Err(e) => {
+                        if self.control.is_cancelled() {
+                            cancelled = true;
+                            break;
+                        }
+                        tracing::warn!("aday üretilemedi: {e:#}");
+                        scored.push((agent_id, prompt, 0.0));
+                    }
                 }
+            }
+            if cancelled {
+                return Ok(());
+            }
+            if let Some(result) = solved {
+                self.learn_and_persist(&result);
+                return self.finalize(&result, gen);
             }
 
             scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
@@ -587,11 +1075,19 @@ impl Runner {
             let seed_prompts: Vec<String> = scored.iter().map(|(_, p, _)| p.clone()).collect();
             while next.len() < size {
                 let base = &seed_prompts[next.len() % seed_prompts.len()];
-                next.push((
-                    Uuid::new_v4().to_string(),
-                    mutate_prompt_heuristically(base, best),
-                    0.0,
-                ));
+                let new_prompt = mutate_prompt_heuristically(base, best);
+                let learned = extract_new_rule(base, &new_prompt);
+                self.emit(
+                    RunEventKind::MutationProposed,
+                    None,
+                    Some(gen),
+                    serde_json::json!({
+                        "previous_score": best,
+                        "failed_tests": 0,
+                        "learned_rule": learned,
+                    }),
+                )?;
+                next.push((Uuid::new_v4().to_string(), new_prompt, 0.0));
             }
             population = next;
         }
@@ -600,198 +1096,43 @@ impl Runner {
         Ok(())
     }
 
-    // ---- adım yardımcıları ----------------------------------------------
-
-    /// Tek üretim + değerlendirme; tüm ara adımlar için event üretir.
-    async fn generate_and_evaluate(
-        &mut self,
-        agent_id: &str,
-        gen: u32,
-    ) -> Result<(String, EvaluationResult)> {
-        let prompt = quine_common::default_system_prompt().to_string();
-        self.generate_and_evaluate_with_prompt(agent_id, gen, &prompt)
-            .await
+    /// Bir aday grubunu gerçekten eşzamanlı üretir/değerlendirir.
+    async fn run_batch(
+        &self,
+        tasks: Vec<CandidateTask>,
+    ) -> Result<Vec<(String, String, Result<(String, EvaluationResult)>)>> {
+        let ctx = self.produce_ctx();
+        let max_concurrent = self.config.limits.max_concurrent.max(1);
+        let sem = Arc::new(Semaphore::new(max_concurrent));
+        let mut set = tokio::task::JoinSet::new();
+        for t in tasks {
+            let ctx = ctx.clone();
+            let sem = sem.clone();
+            let cancel_rx = self.cancel_rx.clone();
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await.expect("semaphore açık");
+                let mut rx = cancel_rx;
+                let out =
+                    produce_candidate(&ctx, &t.agent_id, t.generation, &t.prompt, &mut rx).await;
+                (t.agent_id, t.prompt, out)
+            });
+        }
+        let mut results = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok(r) => results.push(r),
+                Err(e) => {
+                    if e.is_panic() {
+                        return Err(anyhow::anyhow!("aday görevi panikledi: {e}"));
+                    }
+                }
+            }
+        }
+        Ok(results)
     }
 
-    async fn generate_and_evaluate_with_prompt(
-        &mut self,
-        agent_id: &str,
-        gen: u32,
-        prompt: &str,
-    ) -> Result<(String, EvaluationResult)> {
-        // Limit: LLM çağrısı bütçesi.
-        if self.run.total_llm_calls >= self.config.limits.max_llm_calls {
-            self.set_status(RunStatus::LimitReached, RunEventKind::LimitReached, None)?;
-            anyhow::bail!("LLM çağrı limiti aşıldı");
-        }
-
-        let request = LlmRequest {
-            model: self.config.model.clone(),
-            system: prompt.to_string(),
-            prompt: self.problem.to_llm_prompt(),
-            temperature: self.config.temperature as f32,
-            max_tokens: 1024,
-        };
-
-        self.emit(
-            RunEventKind::LlmRequestStarted,
-            Some(agent_id.to_string()),
-            Some(gen),
-            serde_json::json!({"model": request.model}),
-        )?;
-        let t0 = Instant::now();
-        let response = self.call_llm(&request).await?;
-        self.run.total_llm_calls += 1;
-        self.emit(
-            RunEventKind::LlmResponseReceived,
-            Some(agent_id.to_string()),
-            Some(gen),
-            serde_json::json!({
-                "model": response.model,
-                "bytes": response.content.len(),
-            }),
-        )?;
-        let _ = t0;
-
-        let code = match response.extract_code_checked() {
-            Ok(c) => c,
-            Err(e) => {
-                // Model kod üretmedi (küçük modellerde sık). Sandbox'ı boşuna
-                // çalıştırmak yerine açık bir "başarısız aday" üret ve döngünün
-                // mutasyonla toparlanmasına izin ver.
-                let result = EvaluationResult {
-                    problem_id: self.problem.id.clone(),
-                    agent_id: Uuid::parse_str(agent_id).unwrap_or_else(|_| Uuid::new_v4()),
-                    success: false,
-                    score: 0.0,
-                    stdout: String::new(),
-                    stderr: format!("MODEL KOD ÜRETMEDİ: {e:#}"),
-                    duration_ms: 0,
-                    tests_passed: 0,
-                    tests_total: self.problem.test_cases.len(),
-                    evaluated_at: chrono::Utc::now(),
-                };
-                self.emit(
-                    RunEventKind::EvaluationCompleted,
-                    Some(agent_id.to_string()),
-                    Some(gen),
-                    serde_json::json!({
-                        "score": 0.0,
-                        "success": false,
-                        "reason": "model_no_code",
-                    }),
-                )?;
-                self.persist_evaluation(agent_id, &result);
-                return Ok((String::new(), result));
-            }
-        };
-        self.emit(
-            RunEventKind::CodeExtracted,
-            Some(agent_id.to_string()),
-            Some(gen),
-            serde_json::json!({"bytes": code.len()}),
-        )?;
-
-        // Aşırı büyük aday reddedilir (kaynak koruması).
-        if code.len() > self.config.limits.max_candidate_size {
-            self.set_status(RunStatus::LimitReached, RunEventKind::LimitReached, None)?;
-            anyhow::bail!(
-                "aday kod boyutu limiti aşıldı ({} > {})",
-                code.len(),
-                self.config.limits.max_candidate_size
-            );
-        }
-
-        // Guardian kapısı (policy katmanı — tek başına güvenlik sınırı değildir).
-        let t_g = Instant::now();
-        match self.guardian.analyze(&code) {
-            Ok(()) => {
-                self.emit(
-                    RunEventKind::GuardianAllowed,
-                    Some(agent_id.to_string()),
-                    Some(gen),
-                    serde_json::json!({"duration_ms": t_g.elapsed().as_millis() as u64}),
-                )?;
-                self.persist_audit(
-                    agent_id,
-                    AuditDecision::Allowed,
-                    None,
-                    None,
-                    "guardian geçti",
-                );
-            }
-            Err(v) => {
-                let rule = v.violations.first().map(|f| f.rule.clone());
-                let severity = v.violations.first().map(|f| format!("{:?}", f.severity));
-                self.emit(
-                    RunEventKind::GuardianBlocked,
-                    Some(agent_id.to_string()),
-                    Some(gen),
-                    serde_json::json!({"rule": rule, "reason": v.to_string()}),
-                )?;
-                self.persist_audit(
-                    agent_id,
-                    AuditDecision::Blocked,
-                    rule,
-                    severity,
-                    &v.to_string(),
-                );
-                // Değerlendirici de bloklar; sonucu ondan alalım (score 0).
-            }
-        }
-
-        // Sandbox'ta değerlendir (iptal edilebilir).
-        self.emit(
-            RunEventKind::SandboxStarted,
-            Some(agent_id.to_string()),
-            Some(gen),
-            serde_json::json!({"sandbox": self.run.sandbox}),
-        )?;
-        let t_s = Instant::now();
-        let result = self.evaluate(agent_id, &code).await?;
-        self.emit(
-            RunEventKind::SandboxCompleted,
-            Some(agent_id.to_string()),
-            Some(gen),
-            serde_json::json!({"duration_ms": t_s.elapsed().as_millis() as u64}),
-        )?;
-
-        if result.stderr.contains("GUARDIAN BLOCKED") {
-            self.emit(
-                RunEventKind::CompilationFailed,
-                Some(agent_id.to_string()),
-                Some(gen),
-                serde_json::json!({"reason": "guardian"}),
-            )?;
-        }
-
-        self.emit(
-            RunEventKind::TestsCompleted,
-            Some(agent_id.to_string()),
-            Some(gen),
-            serde_json::json!({
-                "passed": result.tests_passed,
-                "total": result.tests_total,
-            }),
-        )?;
-        self.emit(
-            RunEventKind::EvaluationCompleted,
-            Some(agent_id.to_string()),
-            Some(gen),
-            serde_json::json!({
-                "score": result.score,
-                "success": result.success,
-                "tests_passed": result.tests_passed,
-                "tests_total": result.tests_total,
-            }),
-        )?;
-
-        self.persist_evaluation(agent_id, &result);
-        Ok((code, result))
-    }
-
-    /// LLM çağrısı; iptal edilebilir.
-    async fn call_llm(&mut self, request: &LlmRequest) -> Result<quine_llm::LlmResponse> {
+    /// Paylaşılan üretim/değerlendirme bağlamı (paralel ve sıralı yol aynı mantık).
+    fn produce_ctx(&self) -> ProduceCtx {
         let backend: Arc<dyn LlmBackend> = match &self.backend {
             Some(b) => b.clone(),
             None => Arc::new(quine_llm::OllamaBackend::new(
@@ -800,33 +1141,76 @@ impl Runner {
                 self.config.model.clone(),
             )),
         };
-        tokio::select! {
-            r = backend.generate(request) => r.context("LLM üretimi"),
-            _ = self.cancelled() => {
-                anyhow::bail!("run iptal edildi (LLM beklenirken)")
-            }
+        ProduceCtx {
+            emitter: Emitter {
+                bus: self.ctx.bus.clone(),
+                store: self.ctx.store.clone(),
+                run_id: self.run.id.clone(),
+            },
+            guardian: self.guardian.clone(),
+            backend,
+            evaluator: self.evaluator.clone(),
+            problem: self.problem.clone(),
+            model: self.config.model.clone(),
+            temperature: self.config.temperature as f32,
+            max_candidate_size: self.config.limits.max_candidate_size,
+            sandbox: self.run.sandbox.clone(),
         }
     }
 
-    /// Sandbox değerlendirmesi; iptal edilebilir (drop → kill_on_drop).
-    async fn evaluate(&mut self, agent_id: &str, code: &str) -> Result<EvaluationResult> {
-        let ev = self.evaluator.clone();
-        let problem = self.problem.clone();
-        let id = Uuid::parse_str(agent_id).unwrap_or_else(|_| Uuid::new_v4());
-        tokio::select! {
-            r = ev.evaluate(id, &problem, code) => Ok(r),
-            _ = self.cancelled() => {
-                anyhow::bail!("run iptal edildi (sandbox çalışırken)")
-            }
+    /// Başarılı bir sonuçtan öğrenip ajan genomunu kalıcı hale getirir.
+    fn learn_and_persist(&mut self, result: &EvaluationResult) {
+        if result.success && result.score > self.run.best_score {
+            self.run.best_score = result.score;
         }
+        self.persist_agent(result.score);
     }
 
-    /// İptal sinyalini bekleyen future.
-    async fn cancelled(&mut self) {
-        if *self.cancel_rx.borrow() {
-            return;
+    /// Ajanın güncel prompt'unu ve fitness'ını kalıcı hale getirir.
+    fn persist_agent(&self, fitness: f64) {
+        let prompt = self.persistent_prompt();
+        let previous = self
+            .ctx
+            .store
+            .get_agent(&self.agent_uuid)
+            .ok()
+            .flatten()
+            .map(|a| a.fitness_score)
+            .unwrap_or(0.0);
+        let _ = self.ctx.store.upsert_agent(&quine_storage::AgentRecord {
+            id: self.agent_uuid.clone(),
+            run_id: self.run.id.clone(),
+            name: self.problem.id.clone(),
+            generation: self.run.generation,
+            parent_id: None,
+            prompt_hash: hash_str(&prompt),
+            system_prompt: prompt,
+            fitness_score: fitness.max(previous),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+    }
+
+    /// Sıralı yol: tek üretim + değerlendirme (single/evolve).
+    async fn generate_and_evaluate_with_prompt(
+        &mut self,
+        agent_id: &str,
+        gen: u32,
+        prompt: &str,
+    ) -> Result<(String, EvaluationResult)> {
+        if self.run.total_llm_calls >= self.config.limits.max_llm_calls {
+            self.set_status(RunStatus::LimitReached, RunEventKind::LimitReached, None)?;
+            anyhow::bail!("LLM çağrı limiti aşıldı");
         }
-        let _ = self.cancel_rx.changed().await;
+        let ctx = self.produce_ctx();
+        let mut rx = self.cancel_rx.clone();
+        let out = produce_candidate(&ctx, agent_id, gen, prompt, &mut rx).await;
+        if out.is_ok() {
+            self.run.total_llm_calls += 1;
+        }
+        let (code, result) = out?;
+        self.persist_evaluation(agent_id, &result);
+        Ok((code, result))
     }
 
     /// Duraklatma/limit/iptal kontrol noktası. `true` dönerse döngü durmalı.
@@ -843,10 +1227,6 @@ impl Runner {
     }
 
     /// Duraklatma noktası: döngü burada bekleyebilir.
-    ///
-    /// Durum değişimi kullanıcıya görünür olmalı: panelde "duraklatıldı"
-    /// yazısı ve zaman çizelgesinde bir olay olmadan duraklatmak, çalışan bir
-    /// ajanın sessizce donması gibi görünür.
     async fn checkpoint(&mut self) {
         if !self.control.is_paused() || self.control.is_cancelled() {
             return;
@@ -861,50 +1241,70 @@ impl Runner {
     }
 
     /// Başarısızlıktan kural çıkarıp prompt'u günceller (öğrenme).
+    /// Döner: (yeni_prompt, öğrenilen_kural).
+    /// Başarısızlıktan kural çıkarıp prompt'u günceller (öğrenme).
+    /// Döner: (yeni_prompt, öğrenilen_kural).
     async fn propose_mutation(
         &mut self,
         prompt: &str,
         result: &EvaluationResult,
         agent_id: String,
         gen: u32,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<String>)> {
         self.checkpoint().await;
         let failures = vec![result.clone()];
-        // LLM varsa ondan kural isteyelim; yoksa heuristik.
         if let Some(backend) = self.backend.clone() {
             let engine = quine_evolution::MutationEngine::new(backend.as_ref());
-            let agent = quine_common::Agent::new("run-agent");
-            let mut agent = agent;
+            let mut agent = quine_common::Agent::new("run-agent");
             agent.system_prompt = prompt.to_string();
             let model = self.config.model.clone();
             match engine.refine_prompt(&agent, &model, &failures).await {
-                Ok(new_prompt) => return Ok(new_prompt),
+                Ok(new_prompt) => {
+                    let rule = extract_new_rule(prompt, &new_prompt);
+                    return Ok((new_prompt, rule));
+                }
                 Err(e) => {
                     tracing::warn!("refine başarısız ({e:#}); heuristik kural");
                 }
             }
         }
         let _ = (agent_id, gen);
-        Ok(mutate_prompt_heuristically(prompt, self.run.best_score))
+        let new_prompt = mutate_prompt_heuristically(prompt, self.run.best_score);
+        let rule = extract_new_rule(prompt, &new_prompt);
+        Ok((new_prompt, rule))
     }
 
-    fn record_candidate(&mut self, input: CandidateInput<'_>) -> Result<()> {
+    /// Adayı kalıcı hale getirir; oluşturulan adayın kimliğini döner.
+    #[allow(clippy::too_many_arguments)]
+    fn record_candidate(&mut self, input: CandidateInput<'_>) -> Result<String> {
         let CandidateInput {
             agent_id,
             parent_id,
+            parent_candidate_id,
             generation: gen,
             code,
             result,
             delta,
             reason,
+            learned_rule,
+            prompt,
+            previous_code,
         } = input;
+        let id = Uuid::new_v4().to_string();
+        let diff = match previous_code {
+            Some(prev) if prev != code => Some(simple_diff(prev, code)),
+            Some(_) => Some("değişiklik yok (aynı kod)".to_string()),
+            None => Some("initial candidate".to_string()),
+        };
+        let failure_reason = (!result.success).then(|| failure_summary(&result.stderr));
         let rec = CandidateRecord {
-            id: Uuid::new_v4().to_string(),
+            id: id.clone(),
             run_id: self.run.id.clone(),
             agent_id: agent_id.to_string(),
             parent_id,
             generation: gen,
-            prompt_hash: hash_str(code),
+            prompt_hash: hash_str(prompt),
+            code_hash: hash_str(code),
             code: code.to_string(),
             score: result.score,
             tests_passed: result.tests_passed,
@@ -919,7 +1319,10 @@ impl Runner {
             accepted: result.success,
             delta,
             mutation_reason: reason,
-            diff: None,
+            failure_reason,
+            learned_rule,
+            parent_candidate_id,
+            diff,
             created_at: Utc::now(),
         };
         self.ctx.store.insert_candidate(&rec)?;
@@ -935,7 +1338,7 @@ impl Runner {
                 "tests_total": result.tests_total,
             }),
         )?;
-        Ok(())
+        Ok(id)
     }
 
     fn persist_evaluation(&self, agent_id: &str, result: &EvaluationResult) {
@@ -953,31 +1356,6 @@ impl Runner {
             created_at: result.evaluated_at,
         };
         let _ = self.ctx.store.insert_evaluation(&rec);
-    }
-
-    fn persist_audit(
-        &self,
-        agent_id: &str,
-        decision: AuditDecision,
-        rule: Option<String>,
-        severity: Option<String>,
-        reason: &str,
-    ) {
-        let entry = AuditEntry {
-            id: 0,
-            run_id: Some(self.run.id.clone()),
-            timestamp: Utc::now(),
-            decision: match decision {
-                AuditDecision::Allowed => "allowed".into(),
-                AuditDecision::Blocked => "blocked".into(),
-            },
-            rule,
-            severity,
-            file: None,
-            agent_id: Some(agent_id.to_string()),
-            reason: reason.to_string(),
-        };
-        let _ = self.ctx.store.insert_audit(&entry);
     }
 
     /// Başarılı/sonuç üretilmiş bir turu kapatır.

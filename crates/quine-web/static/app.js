@@ -42,6 +42,7 @@ const KIND = {
   MUTATION_ACCEPTED:  ["Yeni yaklaşım kabul edildi", "Prompt iyileştirildi", "good"],
   MUTATION_REJECTED:  ["Yeni yaklaşım reddedildi", "Eski (daha iyi) sürüm korundu", "warn"],
   CANDIDATE_CREATED:  ["Yeni çözüm denendi", null, "warn"],
+  CANDIDATE_REJECTED: ["Aday reddedildi", "Güvenlik kapısı kodu engelledi", "bad"],
   GENERATION_COMPLETED:["Jenerasyon tamamlandı", null, "warn"],
   RUN_PAUSED:         ["Duraklatıldı", null, "warn"],
   RUN_RESUMED:        ["Devam ediliyor", null, "warn"],
@@ -60,10 +61,18 @@ function detailFor(ev) {
     case "LLM_RESPONSE_RECEIVED": return p.bytes != null ? `${p.bytes} bayt yanıt` : null;
     case "GUARDIAN_BLOCKED": return p.rule ? `kural: ${p.rule}` : (p.reason || null);
     case "TESTS_COMPLETED": return p.total != null ? `${p.passed}/${p.total} test geçti` : null;
-    case "EVALUATION_COMPLETED": return p.total != null ? `skor ${p.score} — ${p.passed ?? p.tests_passed}/${p.total ?? p.tests_total} test` : null;
+    case "EVALUATION_COMPLETED": {
+      const pt = p.tests_total ?? p.total; const ps = p.tests_passed ?? p.passed;
+      const base = pt != null ? `skor ${p.score} — ${ps}/${pt} test` : `skor ${p.score}`;
+      return p.failure_reason ? `${base} — ${p.failure_reason}` : base;
+    }
     case "CANDIDATE_CREATED": return p.tests_total != null ? `skor ${p.score} (${p.tests_passed}/${p.tests_total})` : null;
     case "GENERATION_COMPLETED": return p.best_score != null ? `en iyi skor: ${p.best_score}` : null;
-    case "MUTATION_ACCEPTED": return p.score != null ? `yeni skor: ${p.score}` : null;
+    case "MUTATION_ACCEPTED": return p.learned_rule ? `öğrendi: ${p.learned_rule}` : (p.new_score != null ? `yeni skor: ${p.new_score}` : null);
+    case "MUTATION_REJECTED": return p.learned_rule ? `öğrendi (skor artmadı): ${p.learned_rule}` : null;
+    case "MUTATION_PROPOSED": return p.failure_reason ? `neden: ${p.failure_reason}` : null;
+    case "CANDIDATE_REJECTED": return p.rule ? `kural: ${p.rule}` : (p.reason || null);
+    case "EVALUATION_COMPLETED_FAIL": return null;
     case "SANDBOX_STARTED": return p.sandbox ? `sandbox: ${p.sandbox}` : null;
     default: return null;
   }
@@ -149,6 +158,22 @@ async function loadProblems() {
   }
 }
 
+async function loadMetrics() {
+  try {
+    const m = await api.get("/api/metrics");
+    $("metricsInfo").innerHTML = `
+      <div><span class="k">Çalıştırma</span><span class="v">${m.runs_total}</span></div>
+      <div><span class="k">Başarılı</span><span class="v">${m.runs_completed}</span></div>
+      <div><span class="k">Başarısız/limit</span><span class="v">${m.runs_failed}</span></div>
+      <div><span class="k">En iyi skor</span><span class="v">${Number(m.best_score).toFixed(1)}</span></div>
+      <div><span class="k">Ortalama skor</span><span class="v">${Number(m.avg_score).toFixed(1)}</span></div>
+      <div><span class="k">Ort. aday skoru</span><span class="v">${Number(m.avg_candidate_score).toFixed(1)}</span></div>
+      <div><span class="k">Aday</span><span class="v">${m.candidates_total}</span></div>
+      <div><span class="k">Güvenlik engeli</span><span class="v">${m.guardian_blocks}</span></div>
+      <div><span class="k">LLM çağrısı</span><span class="v">${m.llm_calls_total}</span></div>`;
+  } catch (_) {}
+}
+
 // ---- Çalıştırma ---------------------------------------------------------
 async function startRun(simulate) {
   hideAlert();
@@ -229,6 +254,7 @@ async function refreshRun(id) {
     if (terminal) {
       clearInterval(pollTimer); pollTimer = null;
       refreshCandidates(id);
+      loadMetrics();
       if (r.status === "completed" && r.production_success) {
         hideAlert();
       } else if (r.status === "failed" || r.status === "limit_reached") {
@@ -239,6 +265,11 @@ async function refreshRun(id) {
   } catch (_) { /* geçici hataları yut */ }
 }
 
+function esc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 async function refreshCandidates(id) {
   try {
     const list = await api.get(`/api/runs/${id}/candidates`);
@@ -247,15 +278,48 @@ async function refreshCandidates(id) {
     for (const c of list) {
       const tr = document.createElement("tr");
       const delta = (c.delta > 0 ? "+" : "") + Number(c.delta).toFixed(1);
+      const reason = c.failure_reason || (c.status === "failed" ? "—" : "");
+      const rule = c.learned_rule || "";
       tr.innerHTML = `
         <td>${c.generation}</td>
         <td><b>${c.score}</b></td>
         <td>${c.tests_passed}/${c.tests_total}</td>
         <td>${delta}</td>
-        <td><span class="tag ${c.accepted ? "good" : "bad"}">${c.accepted ? "geçti" : "kaldı"}</span></td>`;
+        <td><span class="tag ${c.accepted ? "good" : "bad"}">${c.accepted ? "geçti" : "kaldı"}</span></td>
+        <td class="muted">${esc(reason)}</td>
+        <td>${rule ? '<span class="tag good">' + esc(rule) + "</span>" : '<span class="muted">—</span>'}</td>`;
+      tr.title = "Kodu ve diff'i görmek için tıklayın";
+      tr.addEventListener("click", () => toggleCandidateDetail(tr, c));
       tb.appendChild(tr);
     }
+    await refreshAgent(id);
   } catch (_) {}
+}
+
+function toggleCandidateDetail(tr, c) {
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains("detail-row")) { next.remove(); return; }
+  const dr = document.createElement("tr");
+  dr.className = "detail-row";
+  const td = document.createElement("td");
+  td.colSpan = 7;
+  const diff = c.diff ? `<div class="muted">Değişiklik:</div><pre class="code diff">${esc(c.diff)}</pre>` : "";
+  td.innerHTML = diff + `<div class="muted">Kod:</div><pre class="code">${esc(c.code)}</pre>`;
+  dr.appendChild(td);
+  tr.after(dr);
+}
+
+async function refreshAgent(id) {
+  try {
+    const a = await api.get(`/api/runs/${id}/agent`);
+    $("learnCard").hidden = false;
+    $("agentInfo").innerHTML = `
+      <div><span class="k">Ajan</span><span class="v mono">${esc(a.id)}</span></div>
+      <div><span class="k">Jenerasyon</span><span class="v">${a.generation}</span></div>
+      <div><span class="k">En iyi fitness</span><span class="v">${a.fitness_score}</span></div>
+      <div><span class="k">Prompt özeti</span><span class="v mono">${esc(a.prompt_hash)}</span></div>`;
+    $("agentPrompt").textContent = a.system_prompt || "—";
+  } catch (_) { /* ajan kaydı yoksa kart gizli kalır */ }
 }
 
 // ---- Kumanda ------------------------------------------------------------
@@ -276,6 +340,7 @@ async function control(action) {
   $("resumeBtn").addEventListener("click", () => control("resume"));
   $("cancelBtn").addEventListener("click", () => control("cancel"));
   await loadStatus();
+  await loadMetrics();
   try { await loadProblems(); } catch (e) { showAlert("Problem listesi yüklenemedi: " + e.message); }
   setInterval(loadStatus, 10000);
 })();

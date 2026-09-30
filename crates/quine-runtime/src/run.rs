@@ -39,6 +39,8 @@ pub struct Run {
     pub total_evaluations: u32,
     pub production_success: bool,
     pub error: Option<String>,
+    /// Bu run'ın kullandığı problem spesifikasyonunun anlık görüntüsü (JSON).
+    pub problem_json: String,
 }
 
 impl Run {
@@ -73,6 +75,7 @@ impl Run {
             total_evaluations: 0,
             production_success: false,
             error: None,
+            problem_json: String::new(),
         }
     }
 
@@ -164,6 +167,7 @@ impl Run {
             total_evaluations: self.total_evaluations,
             production_success: self.production_success,
             error: self.error.clone(),
+            problem_json: self.problem_json.clone(),
             quine_version: build.version.clone(),
             git_revision: build.git_revision.clone(),
             sandbox_image: sandbox_image.to_string(),

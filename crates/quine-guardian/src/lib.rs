@@ -53,6 +53,7 @@ pub struct PatternRule {
 
 /// Varsayılan yasaklı desen listesi (MASTER_PLAN Faz 4 / Adım 4.1).
 pub const DEFAULT_RULES: &[PatternRule] = &[
+    // ---- Bellek güvenliği / FFI ------------------------------------------
     PatternRule {
         name: "unsafe-block",
         regex: r"\bunsafe\b",
@@ -60,34 +61,112 @@ pub const DEFAULT_RULES: &[PatternRule] = &[
         reason: "`unsafe` blokları bellek güvenliğini imha eder.",
     },
     PatternRule {
-        name: "fs-remove-all",
-        regex: r"remove_dir_all|remove_file|\bfs::\s*remove",
+        name: "extern-ffi",
+        regex: r#"\bextern\s*"C"|\blibc\s*::"#,
+        severity: Severity::Critical,
+        reason: "FFI/libc çağrıları sandbox sınırını aşabilir.",
+    },
+    // ---- Dosya sistemi: hem okuma hem yazma yasak ------------------------
+    PatternRule {
+        name: "fs-module",
+        regex: r"\bfs\s*::",
+        severity: Severity::Critical,
+        reason: "Dosya sistemi API'leri (std::fs) ajan kodunda yasaktır.",
+    },
+    PatternRule {
+        name: "fs-file-open",
+        regex: r"\bFile\s*::\s*(create|open|create_new|options)|\bOpenOptions\b",
+        severity: Severity::Critical,
+        reason: "Dosya açma/oluşturma ajan kodunda yasaktır.",
+    },
+    PatternRule {
+        name: "fs-mutate",
+        regex: r"\b(create_dir|create_dir_all|rename|copy|hard_link|soft_link|symlink|set_permissions|set_len|truncate)\s*\(",
+        severity: Severity::Critical,
+        reason: "Dosya sistemi değiştiren çağrılar yasaktır.",
+    },
+    PatternRule {
+        name: "fs-remove",
+        regex: r"\b(remove_dir_all|remove_dir|remove_file)\s*\(",
         severity: Severity::Critical,
         reason: "Dosya/silme API'leri ajan kodunda yasaktır.",
     },
     PatternRule {
+        name: "absolute-path",
+        regex: r#""/[A-Za-z][^"]*""#,
+        severity: Severity::Critical,
+        reason: "Mutlak sistem yollarına erişim yasaktır.",
+    },
+    PatternRule {
+        name: "windows-absolute-path",
+        regex: r"[A-Za-z]:\\",
+        severity: Severity::Critical,
+        reason: "Windows mutlak yollarına erişim yasaktır.",
+    },
+    PatternRule {
+        name: "path-traversal",
+        regex: r"\.\./",
+        severity: Severity::Critical,
+        reason: "`../` yol geçişi (path traversal) yasaktır.",
+    },
+    // ---- Ortam değişkenleri: gizli anahtar sızıntısı ---------------------
+    PatternRule {
+        name: "env-access",
+        regex: r"\benv\s*::|\bstd::env\b|\benv!|option_env!",
+        severity: Severity::Critical,
+        reason: "Ortam değişkenleri gizli anahtar taşır; erişim yasaktır.",
+    },
+    // ---- Süreç / shell ---------------------------------------------------
+    PatternRule {
         name: "process-command",
-        regex: r"std::process::Command|process::Command",
+        regex: r"\bstd::process\b|\bprocess\s*::|\bCommand\s*::\s*new\b",
         severity: Severity::Critical,
         reason: "Alt süreç başlatmak yalnız sandbox runner'a aittir.",
     },
     PatternRule {
-        name: "shell-rm-rf",
-        regex: r"rm\s+-rf|mkfs\.|\bdd\s+if=",
+        name: "shell-destructive",
+        regex: r"rm\s+-rf|mkfs\.|\bdd\s+if=|:\(\)\s*\{",
         severity: Severity::Critical,
         reason: "Shell yıkım komutları (`rm -rf` vb.) kesinlikle yasaktır.",
     },
+    // ---- Ağ --------------------------------------------------------------
     PatternRule {
-        name: "raw-network",
-        regex: r"TcpStream|UdpSocket|net::TcpListener",
-        severity: Severity::Warning,
+        name: "network-access",
+        regex: r"TcpStream|UdpSocket|TcpListener|\bstd::net\b|reqwest|hyper|\bureq\b",
+        severity: Severity::Critical,
         reason: "Ağ erişimi air-gapped ilkesini ihlal eder.",
     },
+    // ---- Derleme zamanında host dosyası okuma ---------------------------
     PatternRule {
-        name: "env-secret-access",
-        regex: r"std::env|env::var",
-        severity: Severity::Warning,
-        reason: "Ortam değişkenleri gizli anahtar taşıyabilir.",
+        name: "include-host-file",
+        regex: r"\binclude_str!|\binclude_bytes!|\binclude\s*!\s*\(",
+        severity: Severity::Critical,
+        reason: "Derleme zamanında host dosyası okumak yasaktır.",
+    },
+    // ---- Platforma özel kaçış -------------------------------------------
+    PatternRule {
+        name: "os-specific",
+        regex: r"\bstd::os\b",
+        severity: Severity::Critical,
+        reason: "Platforma özel API'ler sandbox sınırını aşabilir.",
+    },
+    // ---- Takma adlı içe aktarma (alias) kaçışı ---------------------------
+    //
+    // `use std::fs as f; f::write(...)` biçiminde bir takma ad, `fs::`
+    // desenini atlatır ve modül taraması boşa düşer. Kritik modüllerin
+    // takma adla içe aktarılmasını doğrudan engelliyoruz.
+    PatternRule {
+        name: "aliased-module-import",
+        regex: r"\buse\s+(std|core|alloc)\s*::\s*\{?\s*(fs|process|env|net|os|path)\b",
+        severity: Severity::Critical,
+        reason: "Tehlikeli modüllerin takma adla içe aktarılması yasaktır.",
+    },
+    // ---- Yol (path) modülü: traversal'ın ikinci kapısı -------------------
+    PatternRule {
+        name: "path-module",
+        regex: r"\bstd\s*::\s*path\b|\bPath\s*::\s*(new|from)\b|\bPathBuf\b",
+        severity: Severity::Critical,
+        reason: "Yol manipülasyonu sandbox dışına çıkmak için kullanılabilir.",
     },
 ];
 
@@ -266,8 +345,8 @@ mod tests {
             .analyze("std::fs::remove_dir_all(\"/\").unwrap();\nstd::process::Command::new(\"sh\").spawn();")
             .expect_err("must block destructive fs/process calls");
         let rules: Vec<&str> = err.violations.iter().map(|f| f.rule.as_str()).collect();
-        assert!(rules.contains(&"fs-remove-all"));
-        assert!(rules.contains(&"process-command"));
+        assert!(rules.contains(&"fs-remove"), "{rules:?}");
+        assert!(rules.contains(&"process-command"), "{rules:?}");
     }
 
     #[test]
@@ -277,7 +356,88 @@ mod tests {
         let err = analyzer
             .analyze("run(\"rm -rf /\");")
             .expect_err("must block rm -rf");
-        assert_eq!(err.violations[0].rule, "shell-rm-rf");
+        let rules: Vec<&str> = err.violations.iter().map(|f| f.rule.as_str()).collect();
+        assert!(rules.contains(&"shell-destructive"), "{rules:?}");
+    }
+
+    /// P0 regresyon: host dosya sistemine yazma denemesi engellenmeli.
+    #[test]
+    fn blocks_host_filesystem_write_attempts() {
+        let analyzer = DiffAnalyzer::default();
+        let payloads = [
+            r#"use std::fs; pub fn f() { fs::write("/tmp/QUINE_ESCAPE_PROOF.txt", "owned").ok(); }"#,
+            r#"use std::fs::File; pub fn f() { File::create("/tmp/x").ok(); }"#,
+            r#"use std::fs::OpenOptions; pub fn f() { OpenOptions::new().write(true).open("/tmp/x").ok(); }"#,
+            r#"pub fn f() { std::fs::create_dir_all("/tmp/evil").ok(); }"#,
+            r#"pub fn f() { std::fs::rename("/a", "/b").ok(); }"#,
+            r#"pub fn f() { std::fs::copy("/a", "/b").ok(); }"#,
+            r#"pub fn f() { std::fs::remove_file("/etc/passwd").ok(); }"#,
+            r#"pub fn f() { let _ = std::fs::read_to_string("/etc/shadow"); }"#,
+            r#"pub fn f() { let _ = std::fs::read("../../secret"); }"#,
+        ];
+        for p in payloads {
+            assert!(
+                analyzer.analyze(p).is_err(),
+                "P0: bu payload engellenmeliydi: {p}"
+            );
+        }
+    }
+
+    /// P0 regresyon: ortam değişkeni okuma artık kritik.
+    #[test]
+    fn blocks_environment_access() {
+        let analyzer = DiffAnalyzer::default();
+        for p in [
+            r#"pub fn f() -> String { std::env::var("GITHUB_TOKEN").unwrap_or_default() }"#,
+            r#"pub fn f() -> Option<String> { std::env::var("AWS_SECRET_ACCESS_KEY").ok() }"#,
+        ] {
+            let err = analyzer.analyze(p).expect_err("env erişimi engellenmeli");
+            assert!(
+                err.violations.iter().any(|f| f.rule == "env-access"),
+                "{:?}",
+                err.violations
+            );
+        }
+    }
+
+    /// P0 regresyon: mutlak yol ve `../` traversal kritik.
+    #[test]
+    fn blocks_absolute_paths_and_traversal() {
+        let analyzer = DiffAnalyzer::default();
+        for p in [
+            r#"pub fn f() -> String { read("/etc/hosts") }"#,
+            r#"pub fn f() -> String { read("/root/.ssh/id_rsa") }"#,
+            r#"pub fn f() -> String { read("../../../etc/passwd") }"#,
+            r#"pub fn f() -> String { read("C:\\Users\\admin\\secrets.txt") }"#,
+        ] {
+            assert!(analyzer.analyze(p).is_err(), "engellenmeliydi: {p}");
+        }
+    }
+
+    /// P0 regresyon: ağ erişimi artık kritik.
+    #[test]
+    fn blocks_network_access() {
+        let analyzer = DiffAnalyzer::default();
+        let err = analyzer
+            .analyze("let s = std::net::TcpStream::connect(\"127.0.0.1:80\")?;")
+            .expect_err("ağ erişimi engellenmeli");
+        assert!(err.violations.iter().any(|f| f.rule == "network-access"));
+    }
+
+    /// Temiz, zararsız kod hâlâ geçmeli (aşırı katılık regresyonu).
+    #[test]
+    fn normal_solution_code_still_passes() {
+        let analyzer = DiffAnalyzer::default();
+        let samples = [
+            "pub fn fibonacci(n: u32) -> u64 {\n    let (mut a, mut b) = (0u64, 1u64);\n    for _ in 0..n { let t = a + b; a = b; b = t; }\n    a\n}",
+            "pub fn reverse(s: &str) -> String { s.chars().rev().collect() }",
+            "pub fn sum(nums: &[i64]) -> i64 { nums.iter().sum() }",
+            "pub fn title_case(s: &str) -> String {\n    s.split_whitespace().map(|w| {\n        let mut c = w.chars();\n        c.next().map(|f| f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase()).unwrap_or_default()\n    }).collect::<Vec<_>>().join(\" \")\n}",
+            "pub fn second_max(nums: &[i64]) -> i64 {\n    let mut v: Vec<i64> = nums.to_vec();\n    v.sort();\n    v.iter().rev().nth(1).copied().unwrap_or(-1)\n}",
+        ];
+        for s in samples {
+            assert!(analyzer.analyze(s).is_ok(), "temiz kod engellendi: {s}");
+        }
     }
 
     #[test]
@@ -301,12 +461,27 @@ mod tests {
 
     #[test]
     fn warnings_are_reported_by_scan_but_do_not_block() {
-        let analyzer = DiffAnalyzer::default();
-        let code = "let s = std::net::TcpStream::connect(\"127.0.0.1:80\")?;";
+        // Kritik olmayan bulgular `scan` ile görünür ama tek başına engellemez.
+        let warn_rule = PatternRule {
+            name: "test-warning",
+            regex: r"\bTODO\b",
+            severity: Severity::Warning,
+            reason: "test uyarısı",
+        };
+        let analyzer = DiffAnalyzer::new(vec![warn_rule]);
+        let code = "let x = 1; // TODO: iyileştir";
         let findings = analyzer.scan(code);
         assert!(findings.iter().any(|f| f.severity == Severity::Warning));
-        // Warning tek başına engellemez:
         assert!(analyzer.analyze(code).is_ok());
+    }
+
+    #[test]
+    fn default_rules_are_all_critical() {
+        // P0: varsayılan politika fail-closed olmalı — hiçbir kural Warning değil.
+        assert!(
+            DEFAULT_RULES.iter().all(|r| r.severity == Severity::Critical),
+            "tüm varsayılan kurallar kritik olmalı"
+        );
     }
 
     #[test]
@@ -325,6 +500,39 @@ mod tests {
         assert_eq!(rec.decision, AuditDecision::Blocked);
         assert_eq!(rec.agent_id.as_deref(), Some("agent-1"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P0: Adversarial saldırı paketi — kaçış denemeleri engellenmeli.
+    ///
+    /// Her örnek, ajanın ürettiği kodu ana sisteme ulaştırmayı hedefleyen
+    /// gerçekçi bir kaçış denemesidir. Hiçbiri `analyze`'dan geçememeli.
+    #[test]
+    fn adversarial_escapes_are_blocked() {
+        let analyzer = DiffAnalyzer::default();
+        let attacks: &[(&str, &str)] = &[
+            ("host dosyası okuma", r#"let s = std::fs::read_to_string("/etc/passwd").unwrap();"#),
+            ("host dosyasına yazma", r#"std::fs::write("/tmp/pwned", "x").unwrap();"#),
+            ("takma adlı fs", r#"use std::fs as f; f::write("/etc/cron.d/x", "y").unwrap();"#),
+            ("env sızıntısı", r#"let k = std::env::var("GITHUB_TOKEN").unwrap();"#),
+            ("env! makro", r#"let k = env!("SECRET_KEY");"#),
+            ("mutlak yol", r#"let p = "/root/.ssh/id_rsa";"#),
+            ("path traversal", r#"let p = "../../../etc/shadow";"#),
+            ("alt süreç", r#"std::process::Command::new("sh").arg("-c").arg("id").output();"#),
+            ("shell yıkım", r#"let c = "rm -rf /";"#),
+            ("ağ erişimi", r#"let s = std::net::TcpStream::connect("10.0.0.1:22");"#),
+            ("unsafe bellek", r#"let v: u64 = unsafe { core::mem::zeroed() };"#),
+            ("FFI/libc", r#"extern "C" { fn system(c: *const u8) -> i32; }"#),
+            ("derleme zamanı host okuma", r#"let x = include_str!("/etc/hostname");"#),
+            ("platform kaçışı", r#"use std::os::unix::fs::PermissionsExt;"#),
+            ("PathBuf ile kaçış", r#"let p = PathBuf::from("/etc/shadow");"#),
+        ];
+        for (name, code) in attacks {
+            let r = analyzer.analyze(code);
+            assert!(
+                r.is_err(),
+                "saldırı engellenmedi ({name}): {code}\n-> {r:?}"
+            );
+        }
     }
 
     fn uuid_like() -> u128 {

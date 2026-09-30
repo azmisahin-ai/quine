@@ -85,12 +85,28 @@
     </section>
 
     <section class="card wide" id="candCard" hidden>
-      <h2>4 · Denenen çözümler ve puanları</h2>
-      <p class="muted">Her jenerasyonda üretilen kod ve aldığı puan. Yeşil = tüm testler geçti.</p>
+      <h2>4 · Denenen çözümler, puanları ve öğrenilen dersler</h2>
+      <p class="muted">Her jenerasyonda üretilen kod, aldığı puan ve başarısızlıktan çıkarılan ders.
+        Yeşil = tüm testler geçti. Satıra tıklayınca kod ve değişiklik (diff) görünür.</p>
       <table class="table" id="candTable">
-        <thead><tr><th>Jenerasyon</th><th>Skor</th><th>Test</th><th>Δ</th><th>Durum</th></tr></thead>
+        <thead><tr><th>Jen.</th><th>Skor</th><th>Test</th><th>Δ</th><th>Durum</th><th>Hata nedeni</th><th>Öğrenilen ders</th></tr></thead>
         <tbody></tbody>
       </table>
+    </section>
+
+    <section class="card wide" id="learnCard" hidden>
+      <h2>5 · Ajan ne öğrendi? (kalıcı genom)</h2>
+      <p class="muted">Bu problem için ajanın kalıcı sistem prompt'u. Öğrenilen dersler sonraki
+        çalıştırmalarda da korunur.</p>
+      <div class="runmeta" id="agentInfo"></div>
+      <pre class="code" id="agentPrompt">—</pre>
+    </section>
+
+    <section class="card wide">
+      <h2>6 · Toplam istatistikler</h2>
+      <p class="muted">Tüm çalıştırmaların özeti. Ortalama skor tüm sonuçlanmış çalıştırmaları kapsar
+        (yalnızca başarılıları değil), bu yüzden gerçek ilerlemeyi yansıtır.</p>
+      <div class="runmeta" id="metricsInfo"></div>
     </section>
 
     <section class="card wide">

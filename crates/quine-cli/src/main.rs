@@ -223,10 +223,12 @@ fn resolved_model(cfg: &FileConfig) -> String {
 }
 
 fn resolved_sandbox(cfg: &FileConfig) -> String {
+    // Yerleşik varsayılan: docker (production, fail-closed). `local` yalnızca
+    // kullanıcı açıkça isterse (env veya config) devreye girer.
     std::env::var("QUINE_SANDBOX")
         .ok()
         .or_else(|| cfg.sandbox.clone())
-        .unwrap_or_else(|| "local".into())
+        .unwrap_or_else(|| "docker".into())
 }
 
 fn data_path(name: &str) -> PathBuf {
@@ -336,10 +338,12 @@ fn cmd_init() -> Result<()> {
     std::fs::create_dir_all("data/runs")?;
     let cfg = data_path("config.json");
     if !cfg.exists() {
+        // Production varsayılanı: docker (fail-closed). `local` yalnızca
+        // kullanıcı açıkça isterse kullanılır; burada asla yazılmaz.
         let default_cfg = serde_json::json!({
             "ollama_host": std::env::var("OLLAMA_HOST").unwrap_or_else(|_| quine_llm::DEFAULT_OLLAMA_HOST.into()),
             "model": std::env::var("QUINE_MODEL").unwrap_or_else(|_| quine_llm::DEFAULT_MODEL.into()),
-            "sandbox": std::env::var("QUINE_SANDBOX").unwrap_or_else(|_| "local".into()),
+            "sandbox": std::env::var("QUINE_SANDBOX").unwrap_or_else(|_| "docker".into()),
         });
         std::fs::write(&cfg, serde_json::to_string_pretty(&default_cfg)?)?;
     }

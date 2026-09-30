@@ -108,6 +108,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runs/{id}/events", get(run_events))
         .route("/api/runs/{id}/stream", get(run_stream))
         .route("/api/runs/{id}/candidates", get(run_candidates))
+        .route("/api/runs/{id}/agent", get(run_agent))
         .route("/api/runs/{id}/cancel", post(cancel_run))
         .route("/api/runs/{id}/pause", post(pause_run))
         .route("/api/runs/{id}/resume", post(resume_run))
@@ -301,6 +302,25 @@ async fn run_events(
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+async fn run_agent(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<quine_storage::AgentRecord>, ApiError> {
+    let run = app
+        .ctx
+        .store
+        .get_run(&id)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| not_found(format!("run bulunamadı: {id}")))?;
+    let agent_id = format!("agent-{}", run.problem_id);
+    app.ctx
+        .store
+        .get_agent(&agent_id)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(Json)
+        .ok_or_else(|| not_found(format!("ajan kaydı yok: {agent_id}")))
+}
+
 async fn run_candidates(
     State(app): State<AppState>,
     Path(id): Path<String>,
@@ -340,6 +360,26 @@ fn parse_mode(s: &str) -> Option<RunMode> {
         "population" => RunMode::Population,
         _ => return None,
     })
+}
+
+/// Demo için (hatalı, doğru) kod çiftini seçilen problemden üretir.
+///
+/// Her problem için hatalı sürüm derlenir ama testleri geçmez; doğru sürüm
+/// tüm testleri geçer. Böylece demo, seçilen problemde gerçek evrimi gösterir.
+fn demo_script(problem: &Problem) -> (String, String) {
+    let faulty = match problem.id.as_str() {
+        "rev-002" => "```rust\npub fn reverse_string(_s: &str) -> String { String::new() }\n```",
+        "sum-003" => "```rust\npub fn list_sum(xs: &[i64]) -> i64 { xs.len() as i64 }\n```",
+        _ => "```rust\npub fn fibonacci(_n: u32) -> u64 { 0 }\n```",
+    };
+    let fixed = match problem.id.as_str() {
+        "rev-002" => {
+            "```rust\npub fn reverse_string(s: &str) -> String { s.chars().rev().collect() }\n```"
+        }
+        "sum-003" => "```rust\npub fn list_sum(xs: &[i64]) -> i64 { xs.iter().sum() }\n```",
+        _ => "```rust\npub fn fibonacci(n: u32) -> u64 {\n    let (mut a, mut b) = (0u64, 1u64);\n    for _ in 0..n { let t = a + b; a = b; b = t; }\n    a\n}\n```",
+    };
+    (faulty.to_string(), fixed.to_string())
 }
 
 /// Model adını doğrular: boş değil, makul uzunlukta, kontrol karakteri yok.
@@ -443,12 +483,11 @@ async fn start_run(
         // Demo: gözle görülür adımlar + öğrenme döngüsü (yanlış kod → düzeltme).
         // Yerel sandbox kullanılır çünkü demo hiçbir ağ erişimi gerektirmez ve
         // Docker'a bağımlı olursa "LLM'siz de çalışır" sözü tutulmaz olur.
+        // Kritik: senaryo SEÇİLEN probleme göre üretilir; aksi halde kullanıcı
+        // "String Reverse" seçip Fibonacci sonucu görür (yanıltıcı demo).
+        let (faulty, fixed) = demo_script(&problem);
         Some(Arc::new(
-            ScriptedBackend::fail_then_fix(
-                "```rust\npub fn fibonacci(n: u32) -> u64 { let x: u64 = \"wrong\"; x }\n```",
-                "```rust\npub fn fibonacci(n: u32) -> u64 {\n    let (mut a, mut b) = (0u64, 1u64);\n    for _ in 0..n { let t = a + b; a = b; b = t; }\n    a\n}\n```",
-            )
-            .with_delay(Duration::from_millis(900)),
+            ScriptedBackend::fail_then_fix(&faulty, &fixed).with_delay(Duration::from_millis(900)),
         ))
     } else {
         None
