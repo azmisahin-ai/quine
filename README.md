@@ -103,7 +103,7 @@ cargo run --bin quine -- --simulate evolve --iterations 3
 |----------|-----------|----------|
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama sunucu adresi |
 | `QUINE_MODEL` | `qwen2.5-coder:7b` | Kullanılacak model |
-| `QUINE_SANDBOX` | `local` | `local` \| `docker` |
+| `QUINE_SANDBOX` | `local` | `local` \| `docker`. `docker` seçiliyken Docker erişilemezse çalışma **durur** (sessizce `local`'e düşülmez). |
 | `RUST_LOG` | `info` | Log seviyesi |
 
 ---

@@ -136,6 +136,13 @@ fn build_evaluator() -> Result<Arc<Evaluator>> {
     let cfg = load_config();
     let sandbox = quine_eval::sandbox_from_kind(&resolved_sandbox(&cfg))?;
     tracing::info!("sandbox: {}", sandbox.kind());
+    if sandbox.kind() == "local" {
+        eprintln!(
+            "⚠️  Yerel sandbox etkin: LLM kodu bu makinede doğrudan çalıştırılıyor. \
+             Gerçek kullanımda `QUINE_SANDBOX=docker` (veya data/config.json → \
+             \"sandbox\": \"docker\") tercih edin."
+        );
+    }
     Ok(Arc::new(
         Evaluator::new(sandbox).with_audit(AuditLog::new(data_path("audit.log"))),
     ))
