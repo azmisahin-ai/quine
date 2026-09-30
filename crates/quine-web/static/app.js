@@ -205,6 +205,7 @@ function openRun(id) {
   $("timelineCard").hidden = false;
   $("candCard").hidden = false;
   $("runId").textContent = id.slice(0, 8);
+  $("runSource").textContent = "—";
   $("runStatus").textContent = "başlıyor…";
   $("runGen").textContent = "0";
   $("runScore").textContent = "0";
@@ -245,6 +246,10 @@ const STATUS_TR = {
 async function refreshRun(id) {
   try {
     const r = await api.get(`/api/runs/${id}`);
+    const demo = r.workload === "demo";
+    $("runSource").innerHTML = demo
+      ? '<span class="tag">⚡ DEMO — scripted backend, gerçek LLM değil</span>'
+      : '<span class="tag good">🧠 GERÇEK — LLM + sandbox</span>';
     $("runStatus").textContent = STATUS_TR[r.status] || r.status;
     $("runGen").textContent = r.generation;
     $("runScore").textContent = r.best_score;
@@ -308,7 +313,7 @@ async function loadRuns() {
       tr.innerHTML = `
         <td class="mono">${esc(fmtTime(r.created_at))}</td>
         <td>${esc(r.problem_title)} <span class="muted mono">${esc(r.problem_id)}</span></td>
-        <td>${esc(r.workload)}</td>
+        <td>${r.workload === "demo" ? '<span class="tag">⚡ DEMO</span>' : '<span class="tag good">🧠 GERÇEK</span>'}</td>
         <td><span class="tag ${r.status === "completed" ? "good" : r.status === "failed" ? "bad" : ""}">${esc(STATUS_TR[r.status] || r.status)}</span></td>
         <td><b>${Number(r.best_score).toFixed(1)}</b></td>`;
       tr.title = "Bu çalışmanın sonuçlarını yükle";
